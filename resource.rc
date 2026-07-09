@@ -1,0 +1,131 @@
+﻿#pragma code_page(65001)
+#include "resource.h"
+#include <windows.h>
+
+// ============================================================
+// FRANCAIS (langue par défaut)
+// ============================================================
+LANGUAGE LANG_FRENCH, SUBLANG_FRENCH
+
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE       "Remplaceur de Musique Vidéo"
+    IDS_SUBTITLE        "Remplacez le son d'une vidéo par une piste musicale — sans logiciel tiers."
+    IDS_DROP_HINT       "Saisissez un chemin, glissez un fichier, ou cliquez Parcourir."
+
+    IDS_SEC_VIDEO       "1. Fichier vidéo"
+    IDS_SEC_MUSIC       "2. Fichier musical"
+    IDS_SEC_SHORT       "3. Si la musique est plus courte que la vidéo :"
+    IDS_SEC_QUALITY     "4. Qualité / taille du fichier :"
+
+    IDS_BROWSE          "Parcourir…"
+    IDS_CROP_START      "  Rogner  début :"
+    IDS_CROP_END        "  fin :"
+    IDS_CROP_HINT       "(vide = vidéo entière)"
+    IDS_MUS_START       "  Début :"
+    IDS_MUS_END         "  Fin :"
+    IDS_MUS_WAVE_HINT   "← rouge/vert sur la forme d'onde"
+    IDS_VOLUME          "  Volume :"
+    IDS_BTN_GO          "✨  Remplacer l'audio"
+
+    IDS_LOOP            "🔁  Répéter depuis le début choisi"
+    IDS_SILENCE         "🔇  Silence jusqu'à la fin de la vidéo"
+
+    IDS_READY           "Prêt."
+    IDS_ENCODING        "Encodage en cours… %d %%"
+    IDS_DONE_STATUS     "✅  Terminé ! Votre vidéo est prête."
+    IDS_ERR_STATUS      "❌  Erreur lors de l'encodage."
+    IDS_DONE_MSG        "Votre vidéo est prête !"
+    IDS_DONE_TITLE      "C'est fait !"
+    IDS_ERR_TITLE       "Erreur"
+
+    IDS_ERR_NO_VIDEO    "Veuillez choisir un fichier vidéo valide."
+    IDS_ERR_NO_AUDIO    "Veuillez choisir un fichier musical valide."
+    IDS_ERR_BAD_AUD_START "Heure de début musical invalide (format hh:mm:ss)."
+    IDS_ERR_BAD_VID_START "Heure de début vidéo invalide (format hh:mm:ss)."
+    IDS_ERR_VID_ORDER   "Le début de la vidéo doit être avant la fin."
+    IDS_ERR_AUD_ORDER   "Le début de la musique doit être avant la fin."
+    IDS_ERR_TITLE_VAL   "Paramètre invalide"
+
+    IDS_DURATION_FMT    "  Durée : %s   (%s)"
+    IDS_DUR_UNAVAIL     "  (durée non disponible)"
+
+    IDS_PRE0_LBL        "Qualité originale"
+    IDS_PRE0_DSC        "Bitrate identique à la source — taille similaire"
+    IDS_PRE1_LBL        "Facebook / Instagram"
+    IDS_PRE1_DSC        "Max 5 Mbps, 1080p, 128 kbps audio"
+    IDS_PRE2_LBL        "Compact (partage Web)"
+    IDS_PRE2_DSC        "Max 2 Mbps, 720p, 128 kbps audio"
+    IDS_PRE3_LBL        "Pièce jointe e-mail"
+    IDS_PRE3_DSC        "Max 400 kbps, 480p, 96 kbps audio (mono)"
+    IDS_PRE4_LBL        "MMS / SMS"
+    IDS_PRE4_DSC        "Max 150 kbps, 240p, 96 kbps audio (mono)"
+
+    IDS_WAVE_LOAD       "Chargez un fichier audio pour voir la forme d'onde"
+    IDS_WAVE_UNAVAIL    "Forme d'onde non disponible"
+    IDS_WAVE_ANALYZING  "Analyse en cours…"
+END
+
+// ============================================================
+// ANGLAIS
+// ============================================================
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE       "Video Music Replacer"
+    IDS_SUBTITLE        "Replace a video's audio track with music — no third-party software."
+    IDS_DROP_HINT       "Type a path, drag a file, or click Browse."
+
+    IDS_SEC_VIDEO       "1. Video file"
+    IDS_SEC_MUSIC       "2. Music file"
+    IDS_SEC_SHORT       "3. If music is shorter than the video:"
+    IDS_SEC_QUALITY     "4. Quality / file size:"
+
+    IDS_BROWSE          "Browse…"
+    IDS_CROP_START      "  Trim  start:"
+    IDS_CROP_END        "  end:"
+    IDS_CROP_HINT       "(empty = full video)"
+    IDS_MUS_START       "  Start:"
+    IDS_MUS_END         "  End:"
+    IDS_MUS_WAVE_HINT   "← red/green handles on waveform"
+    IDS_VOLUME          "  Volume:"
+    IDS_BTN_GO          "✨  Replace Audio"
+
+    IDS_LOOP            "🔁  Loop from chosen start point"
+    IDS_SILENCE         "🔇  Silence until video ends"
+
+    IDS_READY           "Ready."
+    IDS_ENCODING        "Encoding… %d %%"
+    IDS_DONE_STATUS     "✅  Done! Your video is ready."
+    IDS_ERR_STATUS      "❌  Encoding error."
+    IDS_DONE_MSG        "Your video is ready!"
+    IDS_DONE_TITLE      "Done!"
+    IDS_ERR_TITLE       "Error"
+
+    IDS_ERR_NO_VIDEO    "Please choose a valid video file."
+    IDS_ERR_NO_AUDIO    "Please choose a valid music file."
+    IDS_ERR_BAD_AUD_START "Invalid music start time (format hh:mm:ss)."
+    IDS_ERR_BAD_VID_START "Invalid video start time (format hh:mm:ss)."
+    IDS_ERR_VID_ORDER   "Video start must be before video end."
+    IDS_ERR_AUD_ORDER   "Music start must be before music end."
+    IDS_ERR_TITLE_VAL   "Invalid parameter"
+
+    IDS_DURATION_FMT    "  Duration: %s   (%s)"
+    IDS_DUR_UNAVAIL     "  (duration unavailable)"
+
+    IDS_PRE0_LBL        "Original quality"
+    IDS_PRE0_DSC        "Same bitrate as source — similar file size"
+    IDS_PRE1_LBL        "Facebook / Instagram"
+    IDS_PRE1_DSC        "Max 5 Mbps, 1080p, 128 kbps audio"
+    IDS_PRE2_LBL        "Compact (web sharing)"
+    IDS_PRE2_DSC        "Max 2 Mbps, 720p, 128 kbps audio"
+    IDS_PRE3_LBL        "E-mail attachment"
+    IDS_PRE3_DSC        "Max 400 kbps, 480p, 96 kbps audio (mono)"
+    IDS_PRE4_LBL        "MMS / SMS"
+    IDS_PRE4_DSC        "Max 150 kbps, 240p, 96 kbps audio (mono)"
+
+    IDS_WAVE_LOAD       "Load a music file to see the waveform"
+    IDS_WAVE_UNAVAIL    "Waveform not available"
+    IDS_WAVE_ANALYZING  "Analyzing…"
+END
