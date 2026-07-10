@@ -1,4 +1,5 @@
 #pragma once
+#define IDI_MY_APP_ICON         201
 // String IDs - langue
 #define IDS_APP_TITLE           1
 #define IDS_SUBTITLE            2

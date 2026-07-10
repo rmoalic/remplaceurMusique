@@ -1,13 +1,6 @@
 // ===========================================================================
 //  Video Music Replacer / Remplaceur de Musique Video  v6
-//  Win32 + Media Foundation + ITaskbarList3 -- MSVC 2019/2022 -- C++17 x64
-// ===========================================================================
-//  v6 :
-//   - Fichier ressource (app.rc) : FR/EN via LoadStringW, bon support UTF-8
-//   - ITaskbarList3 : progression dans la barre des taches Windows 7+
-//   - Presets mis a jour (champ audChannels pour mono e-mail/MMS)
-//   - Validation debut < fin pour video ET musique avant lancement
-//   - Toutes les chaines UI chargees via S(id) depuis les ressources
+//  Win32 + Media Foundation -- MSVC 2019/2022 -- C++17 x64
 // ===========================================================================
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -17,7 +10,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
-#include <shobjidl.h>   // ITaskbarList3
+#include <shobjidl.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -845,7 +838,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         HFONT hFT = CreateFont(18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-        // ITaskbarList3
         CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
             IID_PPV_ARGS(&g.pTaskbar));
         if (g.pTaskbar) g.pTaskbar->HrInit();
@@ -1105,7 +1097,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
     wc.lpfnWndProc = WndProc; wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = L"RemplaceurMusique";
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIcon(nullptr, MAKEINTRESOURCE(IDI_MY_APP_ICON));
+    wc.hIconSm = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDI_MY_APP_ICON),
+        IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
     RegisterClassEx(&wc);
 
     HWND hWnd = CreateWindow(L"RemplaceurMusique",

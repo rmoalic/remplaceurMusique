@@ -2,6 +2,30 @@
 #include "resource.h"
 #include <windows.h>
 
+200 VERSIONINFO
+FILEVERSION     0,0,1,0
+PRODUCTVERSION  0,0,1,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904E4"
+    BEGIN
+      VALUE "CompanyName", "github.com/rmoalic"
+      VALUE "FileDescription", "Replace a video sound with an mp3"
+      VALUE "FileVersion", "0.0.1"
+      VALUE "InternalName", "RemplaceurMusique"
+      VALUE "OriginalFilename", "RemplaceurMusique.exe"
+      VALUE "ProductName", "RemplaceurMusique"
+      VALUE "ProductVersion", "0.0.1"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1252
+  END
+END
+
+IDI_MY_APP_ICON ICON "BeOS5 Movie Clip.ico"
 // ============================================================
 // FRANCAIS (langue par défaut)
 // ============================================================
