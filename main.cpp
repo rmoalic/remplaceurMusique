@@ -544,18 +544,31 @@ static void EncodeThread(EncodeParams* raw)
 
     // ── 4. Flux video (H.264) ────────────────────────────────────────────────
     UINT32 outW = vidW, outH = vidH;
-    if (preset.maxWidth > 0 && outW > preset.maxWidth) {
-        float r = (float)preset.maxWidth / outW;
-        outW = preset.maxWidth;
-        outH = ((UINT32)(outH * r)) & ~1u;
+    
+    UINT32 maxW = preset.maxWidth;
+    UINT32 maxH = preset.maxHeight;
+
+    if (vidH > vidW && maxW > maxH) {
+        std::swap(maxW, maxH);
     }
-    if (preset.maxHeight > 0 && outH > preset.maxHeight) {
-        float r = (float)preset.maxHeight / outH;
-        outH = preset.maxHeight;
-        outW = ((UINT32)(outW * r)) & ~1u;
+
+    if (maxW > 0 || maxH > 0) {
+        float scale = 1.0f;
+        if (maxW > 0 && outW > maxW) {
+            scale = std::min(scale, (float)maxW / outW);
+        }
+        if (maxH > 0 && outH > maxH) {
+            scale = std::min(scale, (float)maxH / outH);
+        }
+        
+        if (scale < 1.0f) {
+            outW = (UINT32)(outW * scale);
+            outH = (UINT32)(outH * scale);
+        }
     }
-    outW = (outW + 1) & ~1u;
-    outH = (outH + 1) & ~1u;
+
+    outW = outW & ~1u;
+    outH = outH & ~1u;
 
     UINT32 srcBitrate = MF_GetVideoBitrate(params->videoPath);
     UINT32 vBitrate = (preset.maxVidBitrate == 0)
