@@ -177,11 +177,17 @@ static void TBProgress(int pct)
     g.pTaskbar->SetProgressState(g.hWnd, TBPF_NORMAL);
     g.pTaskbar->SetProgressValue(g.hWnd, (ULONGLONG)pct, 100ULL);
 }
-static void TBDone(bool ok)
+static void TBDone()
 {
     if (!g.pTaskbar || !g.hWnd) return;
-    g.pTaskbar->SetProgressState(g.hWnd, ok ? TBPF_NOPROGRESS : TBPF_ERROR);
+    g.pTaskbar->SetProgressState(g.hWnd, TBPF_NOPROGRESS);
 }
+static void TBError()
+{
+    if (!g.pTaskbar || !g.hWnd) return;
+    g.pTaskbar->SetProgressState(g.hWnd, TBPF_NOPROGRESS);
+}
+
 
 // ---------------------------------------------------------------------------
 // Utilitaires
@@ -1267,7 +1273,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             g.encoding = true;
             EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), FALSE);
-            SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_ENCODING).c_str()); // "0 %" sera mis a jour
+            SetDlgItemText(hWnd, ID_STATIC_STATUS, Sfmt(IDS_ENCODING, 0).c_str());
             HWND hP = GetDlgItem(hWnd, ID_PROGRESS);
             SendMessage(hP, PBM_SETPOS, 0, 0);
             ShowWindow(hP, SW_SHOW);
@@ -1293,16 +1299,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), TRUE);
         ShowWindow(GetDlgItem(hWnd, ID_PROGRESS), SW_HIDE);
         bool ok = (wParam == 1);
-        TBDone(ok);
         if (ok) {
+            TBProgress(100ULL);
             SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_DONE_STATUS).c_str());
             MessageBox(hWnd, S(IDS_DONE_MSG).c_str(), S(IDS_DONE_TITLE).c_str(), MB_ICONINFORMATION);
         }
         else {
+            TBError();
             SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_ERR_STATUS).c_str());
             MessageBox(hWnd, (S(IDS_ERR_TITLE) + L":\n\n" + g.lastError).c_str(),
                        S(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
         }
+        TBDone();
         break;
     }
     case WM_WAVEFORM_READY: {
