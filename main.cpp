@@ -1200,6 +1200,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
         if (id == ID_BTN_VIDEO) {
             std::wstring p = BrowseFile(hWnd, true);
             if (!p.empty())ApplyVideoPath(hWnd, p);
@@ -1208,18 +1209,31 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             std::wstring p = BrowseFile(hWnd, false);
             if (!p.empty())ApplyAudioPath(hWnd, p);
         }
-        else if ((id == ID_EDIT_VIDEO || id == ID_EDIT_AUDIO) && HIWORD(wParam) == EN_KILLFOCUS) {
+        if ((id == ID_EDIT_AUD_START || id == ID_EDIT_AUD_END) && code == EN_CHANGE) {
+            std::wstring txt = CtrlText(hWnd, id);
+            double sec = HMSToSecs(txt);
+            if (sec >= 0.0 && sec <= g.audioDuration) {
+                if (id == ID_EDIT_AUD_START) {
+                    g.audioStartSec = sec;
+                }
+                else if (id == ID_EDIT_AUD_END) {
+                    g.audioEndSec = sec;
+                }
+                InvalidateRect(g.hWaveWnd, nullptr, FALSE);
+            }
+        }
+        else if ((id == ID_EDIT_VIDEO || id == ID_EDIT_AUDIO) && code == EN_KILLFOCUS) {
             std::wstring p = CtrlText(hWnd, id);
             if (!p.empty() && PathFileExists(p.c_str())) {
                 if (id == ID_EDIT_VIDEO) ApplyVideoPath(hWnd, p);
                 else                  ApplyAudioPath(hWnd, p);
             }
         }
-        else if (id == ID_COMBO_QUALITY && HIWORD(wParam) == CBN_SELCHANGE) {
+        else if (id == ID_COMBO_QUALITY && code == CBN_SELCHANGE) {
             g_qualityIdx = (int)SendDlgItemMessage(hWnd, ID_COMBO_QUALITY, CB_GETCURSEL, 0, 0);
             SetDlgItemText(hWnd, ID_STATIC_QINFO, S(PRESETS[g_qualityIdx].dscId).c_str());
         }
-        else if (id == ID_COMBO_AUDSHORT && HIWORD(wParam) == CBN_SELCHANGE) {
+        else if (id == ID_COMBO_AUDSHORT && code == CBN_SELCHANGE) {
             g_audioShortMode = (AudioShortMode)SendDlgItemMessage(hWnd, ID_COMBO_AUDSHORT, CB_GETCURSEL, 0, 0);
         }
         else if (id == ID_BTN_GO) {
