@@ -20,6 +20,8 @@
 #include <propvarutil.h>
 #include <shlwapi.h>
 #include <codecapi.h>
+#include <d3d11.h>
+#include <d3d11_4.h>
 #include "resource.h"
 
 #include <string>
@@ -43,6 +45,8 @@
 #pragma comment(lib,"propsys.lib")
 #pragma comment(lib,"gdi32.lib")
 #pragma comment(lib,"user32.lib")
+#pragma comment(lib,"d3d11.lib")
+
 
 // ---------------------------------------------------------------------------
 // IDs controles
@@ -433,11 +437,6 @@ static LONGLONG WriteSilenceChunk(IMFSinkWriter* pW, DWORD audIdx,
     return realHns;
 }
 
-// Fixed-link infrastructure headers for DXGI manager implementation
-#include <d3d11.h>
-#include <d3d11_4.h>
-#pragma comment(lib, "d3d11.lib")
-
 static void EncodeThread(EncodeParams* raw)
 {
     std::unique_ptr<EncodeParams> params(raw);
@@ -455,37 +454,6 @@ static void EncodeThread(EncodeParams* raw)
     const QualityPreset& preset = PRESETS[params->qualityIdx];
     const LONGLONG pcmBytesNum = (LONGLONG)(44100 * preset.audChannels * 2);
     const LONGLONG pcmHnsDen = 10000000LL;
-
-    auto Fail = [&](UINT msgId) {
-        g.lastError = S(msgId);
-        if (pVid) {
-            pVid->Release();
-            pVid = nullptr;
-        }
-        if (pAud) {
-            pAud->Release();
-            pAud = nullptr;
-        }
-        if (pW) {
-            pW->Finalize();
-            pW->Release();
-            pW = nullptr;
-        }
-        if (pDeviceManager) {
-            pDeviceManager->Release();
-            pDeviceManager = nullptr;
-        }
-        if (pD3D11Context) {
-            pD3D11Context->Release();
-            pD3D11Context = nullptr;
-        }
-        if (pD3D11Device) {
-            pD3D11Device->Release();
-            pD3D11Device = nullptr;
-        }
-        DeleteFile(params->outputPath.c_str());
-        PostMessage(params->hWnd, WM_ENCODE_DONE, 0, 0);
-    };
 
     auto FailW = [&](const wchar_t* msg) {
         g.lastError = msg;
@@ -1390,7 +1358,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         break;
     }
-
     case WM_ENCODE_PROGRESS: {
         int pct = (int)wParam;
         double etaSecs = (double)lParam;
