@@ -54,7 +54,7 @@ BEGIN
     IDS_SILENCE         "🔇  Silence jusqu'à la fin de la vidéo"
 
     IDS_READY           "Prêt."
-    IDS_ENCODING        "Encodage en cours… %d %%"
+    IDS_ENCODING        "Encodage en cours… %d %%    (%s)"
     IDS_DONE_STATUS     "✅  Terminé ! Votre vidéo est prête."
     IDS_ERR_STATUS      "❌  Erreur lors de l'encodage."
     IDS_DONE_MSG        "Votre vidéo est prête !"
@@ -116,7 +116,7 @@ BEGIN
     IDS_SILENCE         "🔇  Silence until video ends"
 
     IDS_READY           "Ready."
-    IDS_ENCODING        "Encoding… %d %%"
+    IDS_ENCODING        "Encoding… %d %%    (%s)"
     IDS_DONE_STATUS     "✅  Done! Your video is ready."
     IDS_ERR_STATUS      "❌  Encoding error."
     IDS_DONE_MSG        "Your video is ready!"

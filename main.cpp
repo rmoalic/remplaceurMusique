@@ -720,11 +720,9 @@ static void EncodeThread(EncodeParams* raw)
     LONGLONG lastProgressHns = 0;
     int nullStreak = 0;
 
-    // --- SETUP TIMING CONFIGURATION ---
-    LARGE_INTEGER qpcFreq, qpcStart, qpcEnd;
+    LARGE_INTEGER qpcFreq, qpcStart;
     QueryPerformanceFrequency(&qpcFreq);
     QueryPerformanceCounter(&qpcStart);
-    // ----------------------------------
 
     while (!vidDone) {
         {
@@ -750,8 +748,18 @@ static void EncodeThread(EncodeParams* raw)
                     vidLastTs = rel;
                     if (maxDurHns != LLONG_MAX && rel - lastProgressHns > 5000000LL) {
                         int pct = (int)std::min(99LL, rel * 100 / maxDurHns);
-                        PostMessage(params->hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, 0);
                         lastProgressHns = rel;
+
+                        LARGE_INTEGER qpcNow;
+                        QueryPerformanceCounter(&qpcNow);
+
+                        double elapsedWallSecs = (double)(qpcNow.QuadPart - qpcStart.QuadPart) / qpcFreq.QuadPart;
+                        double encodeRatio = (elapsedWallSecs > 0.0 && rel > 0)
+                            ? (double)rel / (elapsedWallSecs * 1e7)
+                            : 1.0;
+                        double etaSecs = (((maxDurHns - rel) / 1e7) / encodeRatio);
+
+                        PostMessage(params->hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, (LPARAM) etaSecs);
                     }
                 }
                 pS->Release();
@@ -811,17 +819,6 @@ static void EncodeThread(EncodeParams* raw)
             }
         }
     }
-
-    // --- CAPTURE THE END TIME & COMPUTE DIFFERENCE ---
-    QueryPerformanceCounter(&qpcEnd);
-    double elapsedSeconds = (qpcEnd.QuadPart - qpcStart.QuadPart) / (double)qpcFreq.QuadPart;
-
-    // Optional: Print to standard debug logger so you can view it inside Visual Studio
-    wchar_t logBuf[128];
-    swprintf_s(logBuf, L"[PROFILER] Processing Loop Completed in: %.4f seconds\n", elapsedSeconds);
-    OutputDebugString(logBuf);
-    // -------------------------------------------------
-
     PostMessage(params->hWnd, WM_ENCODE_PROGRESS, 100, 0);
     if (pAud) pAud->Release();
     pVid->Release();
@@ -1378,7 +1375,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             g.encoding = true;
             EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), FALSE);
-            SetDlgItemText(hWnd, ID_STATIC_STATUS, Sfmt(IDS_ENCODING, 0).c_str());
+            wchar_t buf[256] = {};
+            swprintf_s(buf, LoadStr(IDS_ENCODING).c_str(), 0, L"00:00:00");
+            SetDlgItemText(hWnd, ID_STATIC_STATUS, buf);
             HWND hP = GetDlgItem(hWnd, ID_PROGRESS);
             SendMessage(hP, PBM_SETPOS, 0, 0);
             ShowWindow(hP, SW_SHOW);
@@ -1394,8 +1393,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_ENCODE_PROGRESS: {
         int pct = (int)wParam;
+        double etaSecs = (double)lParam;
+        wchar_t buf[256] = {};
+        swprintf_s(buf, LoadStr(IDS_ENCODING).c_str(), pct, SecsToHMS(etaSecs).c_str());
         SendDlgItemMessage(hWnd, ID_PROGRESS, PBM_SETPOS, (WPARAM)pct, 0);
-        SetDlgItemText(hWnd, ID_STATIC_STATUS, Sfmt(IDS_ENCODING, pct).c_str());
+        SetDlgItemText(hWnd, ID_STATIC_STATUS, buf);
         TBProgress(pct);
         break;
     }
