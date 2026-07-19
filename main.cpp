@@ -738,11 +738,6 @@ static void EncodeThread(EncodeParams* raw)
                 if (pS) pS->Release();
             }
             else if (pS) {
-                IMFDXGIBuffer* pDXGI = nullptr;
-                hr = pS->QueryInterface(__uuidof(IMFDXGIBuffer), (void**)&pDXGI);
-                if (SUCCEEDED(hr)) {
-                    printf("Frame on gpu !!\n");
-                }
                 nullStreak = 0;
                 if (vidTimeBase < 0) vidTimeBase = ts;
                 LONGLONG rel = ts - vidTimeBase;
@@ -1163,10 +1158,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         MkB(hWnd, ID_BTN_VIDEO, S(IDS_BROWSE).c_str(), MARGIN + EW + 6, y, BW, ROW_H);
         y += ROW_H + 4;
         MkL(hWnd, S(IDS_CROP_START).c_str(), MARGIN, y + 4, 112, 18);
-        MkE(hWnd, ID_EDIT_VID_START, L"00:00:00", MARGIN + 114, y, 80, ROW_H);
-        MkL(hWnd, S(IDS_CROP_END).c_str(), MARGIN + 198, y + 4, 38, 18);
-        MkE(hWnd, ID_EDIT_VID_END, L"", MARGIN + 238, y, 80, ROW_H);
-        MkL(hWnd, S(IDS_CROP_HINT).c_str(), MARGIN + 322, y + 4, 200, 18);
+        MkE(hWnd, ID_EDIT_VID_START, L"00:00:00", MARGIN + 58, y, 80, ROW_H);
+        MkL(hWnd, S(IDS_CROP_END).c_str(), MARGIN + 142, y + 4, 38, 18);
+        MkE(hWnd, ID_EDIT_VID_END, L"__:__:__", MARGIN + 190, y, 80, ROW_H);
+        MkL(hWnd, S(IDS_CROP_HINT).c_str(), MARGIN + 274, y + 4, 200, 18);
         y += ROW_H + 4;
         MkS(hWnd, ID_STATIC_VID_DUR, L"", MARGIN, y, CW, 16, g.hFontSm);
         y += 22;
@@ -1177,10 +1172,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         MkE(hWnd, ID_EDIT_AUDIO, L"", MARGIN, y, EW, ROW_H);
         MkB(hWnd, ID_BTN_AUDIO, S(IDS_BROWSE).c_str(), MARGIN + EW + 6, y, BW, ROW_H);
         y += ROW_H + 4;
-        MkL(hWnd, S(IDS_MUS_START).c_str(), MARGIN, y + 4, 56, 18);
+        MkL(hWnd, S(IDS_CROP_START).c_str(), MARGIN, y + 4, 56, 18);
         MkE(hWnd, ID_EDIT_AUD_START, L"00:00:00", MARGIN + 58, y, 80, ROW_H);
-        MkL(hWnd, S(IDS_MUS_END).c_str(), MARGIN + 142, y + 4, 46, 18);
-        MkE(hWnd, ID_EDIT_AUD_END, L"", MARGIN + 190, y, 80, ROW_H);
+        MkL(hWnd, S(IDS_CROP_END).c_str(), MARGIN + 142, y + 4, 46, 18);
+        MkE(hWnd, ID_EDIT_AUD_END, L"__:__:__", MARGIN + 190, y, 80, ROW_H);
         MkL(hWnd, S(IDS_MUS_WAVE_HINT).c_str(), MARGIN + 274, y + 4, 300, 18);
         y += ROW_H + 6;
 

@@ -14,8 +14,6 @@
 #define IDS_CROP_START          21
 #define IDS_CROP_END            22
 #define IDS_CROP_HINT           23
-#define IDS_MUS_START           24
-#define IDS_MUS_END             25
 #define IDS_MUS_WAVE_HINT       26
 #define IDS_VOLUME              27
 #define IDS_BTN_GO              28
