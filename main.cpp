@@ -16,6 +16,7 @@
 #include <mfreadwrite.h>
 #include <mferror.h>
 #include <mftransform.h>
+#include <mfobjects.h>
 #include <propvarutil.h>
 #include <shlwapi.h>
 #include <codecapi.h>
@@ -317,7 +318,7 @@ static void ExtractWaveformThread(std::wstring path, HWND hWnd)
 }
 
 // ---------------------------------------------------------------------------
-// Encodage
+// Encodage (Patched with Shared DXGI Device Manager for Pipeline Hardware Caching)
 // ---------------------------------------------------------------------------
 struct EncodeParams {
     std::wstring videoPath, audioPath, outputPath;
@@ -432,6 +433,11 @@ static LONGLONG WriteSilenceChunk(IMFSinkWriter* pW, DWORD audIdx,
     return realHns;
 }
 
+// Fixed-link infrastructure headers for DXGI manager implementation
+#include <d3d11.h>
+#include <d3d11_4.h>
+#pragma comment(lib, "d3d11.lib")
+
 static void EncodeThread(EncodeParams* raw)
 {
     std::unique_ptr<EncodeParams> params(raw);
@@ -440,9 +446,14 @@ static void EncodeThread(EncodeParams* raw)
     IMFSinkWriter* pW = nullptr;
     DWORD vidIdx = 0, audIdx = 1;
 
+    // DX11 hardware compilation resources
+    ID3D11Device* pD3D11Device = nullptr;
+    ID3D11DeviceContext* pD3D11Context = nullptr;
+    IMFDXGIDeviceManager* pDeviceManager = nullptr;
+    UINT resetToken = 0;
+
     const QualityPreset& preset = PRESETS[params->qualityIdx];
-    // bytes PCM par hns selon le nombre de canaux
-    const LONGLONG pcmBytesNum = (LONGLONG)(44100 * preset.audChannels * 2); // bytes/s
+    const LONGLONG pcmBytesNum = (LONGLONG)(44100 * preset.audChannels * 2);
     const LONGLONG pcmHnsDen = 10000000LL;
 
     auto Fail = [&](UINT msgId) {
@@ -460,10 +471,22 @@ static void EncodeThread(EncodeParams* raw)
             pW->Release();
             pW = nullptr;
         }
+        if (pDeviceManager) {
+            pDeviceManager->Release();
+            pDeviceManager = nullptr;
+        }
+        if (pD3D11Context) {
+            pD3D11Context->Release();
+            pD3D11Context = nullptr;
+        }
+        if (pD3D11Device) {
+            pD3D11Device->Release();
+            pD3D11Device = nullptr;
+        }
         DeleteFile(params->outputPath.c_str());
         PostMessage(params->hWnd, WM_ENCODE_DONE, 0, 0);
     };
-    // Fallback si la string resource n'existe pas encore
+
     auto FailW = [&](const wchar_t* msg) {
         g.lastError = msg;
         if (pVid) {
@@ -479,6 +502,18 @@ static void EncodeThread(EncodeParams* raw)
             pW->Release();
             pW = nullptr;
         }
+        if (pDeviceManager) {
+            pDeviceManager->Release();
+            pDeviceManager = nullptr;
+        }
+        if (pD3D11Context) {
+            pD3D11Context->Release();
+            pD3D11Context = nullptr;
+        }
+        if (pD3D11Device) {
+            pD3D11Device->Release();
+            pD3D11Device = nullptr;
+        }
         DeleteFile(params->outputPath.c_str());
         PostMessage(params->hWnd, WM_ENCODE_DONE, 0, 0);
     };
@@ -488,34 +523,70 @@ static void EncodeThread(EncodeParams* raw)
                            ? (LONGLONG)(params->audioEnd * 1e7) : 0;
     LONGLONG audioRangeHns = (audioEndHns > 0) ? (audioEndHns - audioStartHns) : LLONG_MAX;
 
-    // ── 1. Video ─────────────────────────────────────────────────────────────
+    // Initialize Shared Direct3D 11 Context for Hardware Pipeline Accelerator
+    HRESULT hrD3D = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                      D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                      nullptr, 0, D3D11_SDK_VERSION, &pD3D11Device, nullptr, &pD3D11Context);
+
+    if (SUCCEEDED(hrD3D)) {
+        // --- CORRECTIF MULTITHREAD IMPÉRATIF POUR MEDIA FOUNDATION ---
+        ID3D11Multithread* pMultithread = nullptr;
+        if (SUCCEEDED(pD3D11Device->QueryInterface(__uuidof(ID3D11Multithread), (void**)&pMultithread))) {
+            pMultithread->SetMultithreadProtected(TRUE);
+            pMultithread->Release();
+        }
+        // -------------------------------------------------------------
+
+        hrD3D = MFCreateDXGIDeviceManager(&resetToken, &pDeviceManager);
+        if (SUCCEEDED(hrD3D)) {
+            hrD3D = pDeviceManager->ResetDevice(pD3D11Device, resetToken);
+        }
+    }
+    // ── 1. Video Reader Setup ────────────────────────────────────────
     {
         IMFAttributes* pA = nullptr;
-        MFCreateAttributes(&pA, 2);
-        pA->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+        MFCreateAttributes(&pA, 3);
+
+        // DO NOT set MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING
+        // it inserts XVP which forces software color conversion and kills IMFDXGIBuffer
         pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+        pA->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
+
+        if (pDeviceManager)
+            pA->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, pDeviceManager);
+
         HRESULT hr = MFCreateSourceReaderFromURL(params->videoPath.c_str(), pA, &pVid);
         pA->Release();
-        if (FAILED(hr)) return FailW(L"Impossible d'ouvrir la vid\u00e9o source.");
+
+        if (FAILED(hr)) return FailW(L"Impossible d'ouvrir la vidéo source.");
     }
+
     pVid->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
     pVid->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
 
+    // Try GPU-compatible subtypes in order
     IMFMediaType* pDecT = nullptr;
     MFCreateMediaType(&pDecT);
     pDecT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    pDecT->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_YUY2);
-    HRESULT hr = pVid->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, pDecT);
-    if (FAILED(hr)) {
-        pDecT->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+
+    const GUID subtypesToTry[] = { MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoFormat_YUY2 };
+    HRESULT hr = E_FAIL;
+    for (const GUID& subtype : subtypesToTry) {
+        pDecT->SetGUID(MF_MT_SUBTYPE, subtype);
         hr = pVid->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, pDecT);
+        if (SUCCEEDED(hr)) {
+            // Warn if we fell back past NV12 — GPU path won't be available
+            if (subtype == MFVideoFormat_YUY2)
+                OutputDebugString(L"[WARN] Decoder fell back to YUY2 — no GPU surfaces\n");
+            break;
+        }
     }
     pDecT->Release();
-    if (FAILED(hr)) return FailW(L"Impossible de d\u00e9coder la vid\u00e9o.");
-
+    if (FAILED(hr)) return FailW(L"Impossible de décoder la vidéo.");
+    
     IMFMediaType* pVidActual = nullptr;
     pVid->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pVidActual);
-    if (!pVidActual) return FailW(L"Erreur lecture type vid\u00e9o.");
+    if (!pVidActual) return FailW(L"Erreur lecture type vidéo.");
 
     UINT32 vidW = 0, vidH = 0;
     MFGetAttributeSize(pVidActual, MF_MT_FRAME_SIZE, &vidW, &vidH);
@@ -526,31 +597,36 @@ static void EncodeThread(EncodeParams* raw)
         frDen = 1;
     }
 
-    // ── 2. Audio ──────────────────────────────────────────────────────────────
+    // ── 2. Audio Reader Setup ────────────────────────────────────────────────
     pAud = OpenAudioReader(params->audioPath, params->audioStart, preset.audChannels);
     if (!pAud) {
         pVidActual->Release();
-        return FailW(L"Impossible de d\u00e9coder l'audio.");
+        return FailW(L"Impossible de décoder l'audio.");
     }
     LONGLONG audPosInRange = 0;
 
-    // ── 3. SinkWriter ────────────────────────────────────────────────────────
+    // ── 3. SinkWriter Setup ──────────────────────────────────────────────────
     {
         IMFAttributes* pA = nullptr;
-        MFCreateAttributes(&pA, 2);
+        MFCreateAttributes(&pA, 3);
         pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
         pA->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+
+        // Link the writer to the identical hardware context
+        if (pDeviceManager) {
+            pA->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, pDeviceManager);
+        }
+
         hr = MFCreateSinkWriterFromURL(params->outputPath.c_str(), nullptr, pA, &pW);
         pA->Release();
     }
     if (FAILED(hr)) {
         pVidActual->Release();
-        return FailW(L"Impossible de cr\u00e9er le fichier de sortie.");
+        return FailW(L"Impossible de créer le fichier de sortie.");
     }
 
-    // ── 4. Flux video (H.264) ────────────────────────────────────────────────
+    // ── 4. Video Stream (H.264) ──────────────────────────────────────────────
     UINT32 outW = vidW, outH = vidH;
-    
     UINT32 maxW = preset.maxWidth;
     UINT32 maxH = preset.maxHeight;
 
@@ -566,13 +642,11 @@ static void EncodeThread(EncodeParams* raw)
         if (maxH > 0 && outH > maxH) {
             scale = std::min(scale, (float)maxH / outH);
         }
-        
         if (scale < 1.0f) {
             outW = (UINT32)(outW * scale);
             outH = (UINT32)(outH * scale);
         }
     }
-
     outW = outW & ~1u;
     outH = outH & ~1u;
 
@@ -599,9 +673,9 @@ static void EncodeThread(EncodeParams* raw)
     }
     hr = pW->SetInputMediaType(vidIdx, pVidActual, nullptr);
     pVidActual->Release();
-    if (FAILED(hr)) return FailW(L"Type vid\u00e9o incompatible avec l'encodeur H264.");
+    if (FAILED(hr)) return FailW(L"Type vidéo incompatible avec l'encodeur H264.");
 
-    // ── 5. Flux audio (AAC-LC) ───────────────────────────────────────────────
+    // ── 5. Audio Stream (AAC-LC) ─────────────────────────────────────────────
     IMFMediaType* pAudOut = nullptr;
     MFCreateMediaType(&pAudOut);
     pAudOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -610,7 +684,7 @@ static void EncodeThread(EncodeParams* raw)
     pAudOut->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
     pAudOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)preset.audChannels);
     pAudOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, preset.audBytesPerSec);
-    pAudOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29); // AAC-LC
+    pAudOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
     hr = pW->AddStream(pAudOut, &audIdx);
     pAudOut->Release();
     if (FAILED(hr)) return FailW(L"Erreur ajout flux AAC.");
@@ -626,7 +700,7 @@ static void EncodeThread(EncodeParams* raw)
     pAudIn->Release();
     if (FAILED(hr)) return FailW(L"Erreur configuration AAC. (Windows 7+)");
 
-    // ── 6. Seek video ────────────────────────────────────────────────────────
+    // ── 6. Seek Video ────────────────────────────────────────────────────────
     if (params->videoStart > 0.0) {
         PROPVARIANT v;
         v.vt = VT_I8;
@@ -634,9 +708,9 @@ static void EncodeThread(EncodeParams* raw)
         pVid->SetCurrentPosition(GUID_NULL, v);
     }
 
-    // ── 7. Boucle d'encodage ─────────────────────────────────────────────────
+    // ── 7. Processing Loop ───────────────────────────────────────────────────
     hr = pW->BeginWriting();
-    if (FAILED(hr)) return FailW(L"Erreur d\u00e9marrage \u00e9criture MP4.");
+    if (FAILED(hr)) return FailW(L"Erreur démarrage écriture MP4.");
 
     LONGLONG maxDurHns = (params->videoEnd > params->videoStart && params->videoEnd > 0.0)
                          ? (LONGLONG)((params->videoEnd - params->videoStart) * 1e7) : LLONG_MAX;
@@ -646,8 +720,13 @@ static void EncodeThread(EncodeParams* raw)
     LONGLONG lastProgressHns = 0;
     int nullStreak = 0;
 
+    // --- SETUP TIMING CONFIGURATION ---
+    LARGE_INTEGER qpcFreq, qpcStart, qpcEnd;
+    QueryPerformanceFrequency(&qpcFreq);
+    QueryPerformanceCounter(&qpcStart);
+    // ----------------------------------
+
     while (!vidDone) {
-        // Frame video
         {
             IMFSample* pS = nullptr;
             DWORD flags = 0;
@@ -656,11 +735,14 @@ static void EncodeThread(EncodeParams* raw)
                                   0, nullptr, &flags, &ts, &pS);
             if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
                 vidDone = true;
-                if (pS) {
-                    pS->Release();
-                }
+                if (pS) pS->Release();
             }
             else if (pS) {
+                IMFDXGIBuffer* pDXGI = nullptr;
+                hr = pS->QueryInterface(__uuidof(IMFDXGIBuffer), (void**)&pDXGI);
+                if (SUCCEEDED(hr)) {
+                    printf("Frame on gpu !!\n");
+                }
                 nullStreak = 0;
                 if (vidTimeBase < 0) vidTimeBase = ts;
                 LONGLONG rel = ts - vidTimeBase;
@@ -709,7 +791,7 @@ static void EncodeThread(EncodeParams* raw)
                     }
                 }
                 else {
-                    if (pS)pS->Release();
+                    if (pS) pS->Release();
                     eof = true;
                 }
 
@@ -717,7 +799,6 @@ static void EncodeThread(EncodeParams* raw)
                     audEOF = true;
                     if (params->audioShortMode == ASM_LOOP) {
                         pAud->Release();
-                        // Relancer depuis le point de depart CHOISI
                         pAud = OpenAudioReader(params->audioPath, params->audioStart, preset.audChannels);
                         audPosInRange = 0;
                         if (pAud) audEOF = false;
@@ -736,15 +817,30 @@ static void EncodeThread(EncodeParams* raw)
         }
     }
 
+    // --- CAPTURE THE END TIME & COMPUTE DIFFERENCE ---
+    QueryPerformanceCounter(&qpcEnd);
+    double elapsedSeconds = (qpcEnd.QuadPart - qpcStart.QuadPart) / (double)qpcFreq.QuadPart;
+
+    // Optional: Print to standard debug logger so you can view it inside Visual Studio
+    wchar_t logBuf[128];
+    swprintf_s(logBuf, L"[PROFILER] Processing Loop Completed in: %.4f seconds\n", elapsedSeconds);
+    OutputDebugString(logBuf);
+    // -------------------------------------------------
+
     PostMessage(params->hWnd, WM_ENCODE_PROGRESS, 100, 0);
-    if (pAud)pAud->Release();
+    if (pAud) pAud->Release();
     pVid->Release();
     pW->Finalize();
     pW->Release();
+
+    // Clean up hardware graphics acceleration contexts safely
+    if (pDeviceManager) pDeviceManager->Release();
+    if (pD3D11Context) pD3D11Context->Release();
+    if (pD3D11Device) pD3D11Device->Release();
+
     g.lastError.clear();
     PostMessage(params->hWnd, WM_ENCODE_DONE, 1, 0);
 }
-
 // ---------------------------------------------------------------------------
 // Dessin waveform
 // ---------------------------------------------------------------------------
