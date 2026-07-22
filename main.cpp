@@ -31,6 +31,7 @@
 #include <d3d11_4.h>
 #include <wrl/client.h>   // ComPtr
 #include "resource.h"
+#include "EncodeThread.hpp"
 #include "Encode.hpp"
 
 #include <string>
