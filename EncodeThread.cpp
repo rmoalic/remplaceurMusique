@@ -1,17 +1,212 @@
 ﻿#include <memory>
 #include <algorithm>
-#include <winnt.h>
-#include <WinUser.h>
+
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+
 #include <wrl/client.h>
 #include <d3d11.h>
 #include <d3d11_4.h>
-#include <mfobjects.h>
-#include <mfreadwrite.h>
+
 #include <mfapi.h>
 #include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
+#include <mftransform.h>
+#include <mfobjects.h>
+
 using namespace Microsoft::WRL;
 
+#include "EncodeThread.hpp"
 #include "Encode.hpp"
+
+class EncodeThread {
+    ComPtr<ID3D11Device>         pD3DDevice;
+    ComPtr<ID3D11DeviceContext>  pD3DContext;
+    ComPtr<IMFDXGIDeviceManager> pDevMgr;
+    
+    EncodeThread(std::unique_ptr<EncodeParams> params, QualityPreset preset) {
+        init_D3D11_DXGI();
+        ComPtr<IMFSourceReader> pVideo = init_video_source_reader(params->videoPath);
+        ComPtr<IMFSourceReader> pAudio = init_audio_reader(params->audioPath, params->audioStart, preset.audChannels);
+    }
+
+    void Fail(std::wstring f) {
+    }
+
+    void init_D3D11_DXGI() {
+        HRESULT hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &this->pD3DDevice, nullptr, &this->pD3DContext);
+        UINT resetToken = 0;
+        if (SUCCEEDED(hr)) {
+            ComPtr<ID3D11Multithread> pMT;
+            if (SUCCEEDED(pD3DDevice->QueryInterface(IID_PPV_ARGS(&pMT))))
+                pMT->SetMultithreadProtected(TRUE);
+
+            if (SUCCEEDED(MFCreateDXGIDeviceManager(&resetToken, &this->pDevMgr)))
+                this->pDevMgr->ResetDevice(pD3DDevice.Get(), resetToken);
+        }
+    }
+
+    ComPtr<IMFSourceReader> init_video_source_reader(const std::wstring& video_url) {
+        ComPtr<IMFSourceReader> pVid;
+        {
+            ComPtr<IMFAttributes> pA;
+            MFCreateAttributes(&pA, 3);
+            pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+            pA->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
+            if (pDevMgr)
+                pA->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, pDevMgr.Get());
+
+            if (FAILED(MFCreateSourceReaderFromURL(video_url.c_str(), pA.Get(), &pVid))) {
+                Fail(L"Impossible d'ouvrir la vid\u00e9o source.");
+                return nullptr;
+            }
+        }
+
+        pVid->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+        pVid->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+
+        // Try GPU-compatible subtypes: NV12 first (best for HW encode), then P010, YUY2
+        {
+            ComPtr<IMFMediaType> pDecT;
+            MFCreateMediaType(&pDecT);
+            pDecT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+
+            const GUID subtypes[] = { MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoFormat_YUY2 };
+            HRESULT hr = E_FAIL;
+            for (const GUID& st : subtypes) {
+                pDecT->SetGUID(MF_MT_SUBTYPE, st);
+                hr = pVid->SetCurrentMediaType(
+                    (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, pDecT.Get());
+                if (SUCCEEDED(hr)) break;
+            }
+            if (FAILED(hr)) {
+                Fail(L"Erreur lecture type vid\u00e9o.");
+                return nullptr;
+            }
+        }
+
+        ComPtr<IMFMediaType> pVidActual;
+        pVid->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pVidActual);
+        if (!pVidActual) {
+            Fail(L"Erreur lecture type vid\u00e9o.");
+            return nullptr;
+        }
+
+        UINT32 vidW = 0, vidH = 0;
+        MFGetAttributeSize(pVidActual.Get(), MF_MT_FRAME_SIZE, &vidW, &vidH);
+        UINT32 frNum = 0, frDen = 1;
+        MFGetAttributeRatio(pVidActual.Get(), MF_MT_FRAME_RATE, &frNum, &frDen);
+        if (frNum == 0) {
+            frNum = 30;
+            frDen = 1;
+        }
+        return pVid;
+    }
+
+    ComPtr<IMFSourceReader> init_audio_reader(const std::wstring& path, double seekSecs, int channels)
+    {
+        ComPtr<IMFSourceReader> pR;
+        if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &pR))) return {};
+
+        pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+        pR->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
+
+        ComPtr<IMFMediaType> pT;
+        MFCreateMediaType(&pT);
+        pT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        pT->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+        pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)channels);
+        pT->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
+        pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        if (FAILED(pR->SetCurrentMediaType(
+            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get())))
+            return {};
+
+        if (seekSecs > 0.0) {
+            PROPVARIANT v;
+            v.vt = VT_I8;
+            v.hVal.QuadPart = (LONGLONG)(seekSecs * 1e7);
+            pR->SetCurrentPosition(GUID_NULL, v);
+        }
+        if (!pR) {
+            Fail(L"Impossible de d\u00e9coder l'audio.");
+            return nullptr;
+        }
+        return pR;
+    }
+
+    ComPtr<IMFSinkWriter> init_sink_writer() {
+        ComPtr<IMFSinkWriter> pW;
+        ComPtr<IMFAttributes> pA;
+        MFCreateAttributes(&pA, 3);
+        pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+        pA->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+        if (pDevMgr)
+            pA->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, pDevMgr.Get());
+
+        if (FAILED(MFCreateSinkWriterFromURL(
+            params->outputPath.c_str(), nullptr, pA.Get(), &pW))) {
+            Fail(L"Impossible de cr\u00e9er le fichier de sortie.");
+            return nullptr;
+        }
+        return pW;
+    }
+
+    void init_video_output_stream(preset) {
+        UINT32 outW = vidW, outH = vidH;
+
+        // Swap the preset bounding box for portrait videos so the limit that
+        // was intended for width applies to height and vice-versa.
+        UINT32 maxW = preset.maxWidth, maxH = preset.maxHeight;
+        if (vidH > vidW && maxW > 0 && maxH > 0) std::swap(maxW, maxH);
+
+        if (maxW > 0 || maxH > 0) {
+            float scaleW = (maxW > 0 && outW > maxW) ? (float)maxW / outW : 1.0f;
+            float scaleH = (maxH > 0 && outH > maxH) ? (float)maxH / outH : 1.0f;
+            float scale = min(scaleW, scaleH);
+            if (scale < 1.0f) {
+                outW = (UINT32)(outW * scale);
+                outH = (UINT32)(outH * scale);
+            }
+        }
+        // H.264 requires even dimensions
+        outW = (outW & ~1u);
+        if (outW == 0) outW = 2;
+        outH = (outH & ~1u);
+        if (outH == 0) outH = 2;
+
+        UINT32 srcBitrate = MF_GetVideoBitrate(params->videoPath);
+        UINT32 vBitrate = (preset.maxVidBitrate == 0)
+            ? ((srcBitrate > 0) ? srcBitrate : 4000000)
+            : ((srcBitrate > 0) ? min(preset.maxVidBitrate, srcBitrate) : preset.maxVidBitrate);
+
+        DWORD vidIdx = 0, audIdx = 1;
+
+        {
+            ComPtr<IMFMediaType> pVidOut;
+            MFCreateMediaType(&pVidOut);
+            pVidOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            pVidOut->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+            pVidOut->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+            MFSetAttributeSize(pVidOut.Get(), MF_MT_FRAME_SIZE, outW, outH);
+            MFSetAttributeRatio(pVidOut.Get(), MF_MT_FRAME_RATE, frNum, frDen);
+            MFSetAttributeRatio(pVidOut.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+            pVidOut->SetUINT32(MF_MT_AVG_BITRATE, vBitrate);
+            pVidOut->SetUINT32(MF_MT_MPEG2_PROFILE, (UINT32)preset.h264Profile);
+
+            if (FAILED(pW->AddStream(pVidOut.Get(), &vidIdx)))
+                return Fail(L"Erreur ajout flux H264.");
+        }
+        if (FAILED(pW->SetInputMediaType(vidIdx, pVidActual.Get(), nullptr)))
+            return Fail(L"Type vid\u00e9o incompatible avec l'encodeur H264.");
+
+    }
+};
 
 static LONGLONG WriteSilenceChunk(
     IMFSinkWriter* pW, DWORD audIdx,
@@ -47,7 +242,7 @@ static LONGLONG WriteSilenceChunk(
     return realHns;
 }
 
-static double MF_GetDuration(const std::wstring& path)
+double MF_GetDuration(const std::wstring& path)
 {
     ComPtr<IMFSourceReader> r;
     if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &r))) return 0.0;
@@ -61,7 +256,7 @@ static double MF_GetDuration(const std::wstring& path)
     return d;
 }
 
-static UINT32 MF_GetVideoBitrate(const std::wstring& path)
+UINT32 MF_GetVideoBitrate(const std::wstring& path)
 {
     ComPtr<IMFSourceReader> r;
     if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &r))) return 0;
@@ -73,34 +268,6 @@ static UINT32 MF_GetVideoBitrate(const std::wstring& path)
     return br;
 }
 
-static ComPtr<IMFSourceReader> OpenAudioReader(
-    const std::wstring& path, double seekSecs, int channels)
-{
-    ComPtr<IMFSourceReader> pR;
-    if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &pR))) return {};
-
-    pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    pR->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
-
-    ComPtr<IMFMediaType> pT;
-    MFCreateMediaType(&pT);
-    pT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-    pT->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)channels);
-    pT->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    if (FAILED(pR->SetCurrentMediaType(
-                   (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get())))
-        return {};
-
-    if (seekSecs > 0.0) {
-        PROPVARIANT v;
-        v.vt = VT_I8;
-        v.hVal.QuadPart = (LONGLONG)(seekSecs * 1e7);
-        pR->SetCurrentPosition(GUID_NULL, v);
-    }
-    return pR;
-}
 
 static void WriteAudioSample(
     IMFSinkWriter* pW, DWORD audIdx,
@@ -166,145 +333,17 @@ static void EncodeThread(std::unique_ptr<EncodeParams> params)
     };
 
     // ── D3D11 device + DXGI device manager ──────────────────────────────────
-    ComPtr<ID3D11Device>        pD3DDevice;
-    ComPtr<ID3D11DeviceContext> pD3DContext;
-    ComPtr<IMFDXGIDeviceManager> pDevMgr;
-    UINT resetToken = 0;
+
 
     {
-        HRESULT hr = D3D11CreateDevice(
-                         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                         D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                         nullptr, 0, D3D11_SDK_VERSION,
-                         &pD3DDevice, nullptr, &pD3DContext);
-
-        if (SUCCEEDED(hr)) {
-            // MF requires multithread protection on the D3D device
-            ComPtr<ID3D11Multithread> pMT;
-            if (SUCCEEDED(pD3DDevice->QueryInterface(IID_PPV_ARGS(&pMT))))
-                pMT->SetMultithreadProtected(TRUE);
-
-            if (SUCCEEDED(MFCreateDXGIDeviceManager(&resetToken, &pDevMgr)))
-                pDevMgr->ResetDevice(pD3DDevice.Get(), resetToken);
-        }
-        // Non-fatal: fall back to software if D3D setup fails
-    }
 
     // ── 1. Video source reader ───────────────────────────────────────────────
-    ComPtr<IMFSourceReader> pVid;
-    {
-        ComPtr<IMFAttributes> pA;
-        MFCreateAttributes(&pA, 3);
-        pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-        pA->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
-        if (pDevMgr)
-            pA->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, pDevMgr.Get());
-
-        if (FAILED(MFCreateSourceReaderFromURL(params->videoPath.c_str(), pA.Get(), &pVid)))
-            return Fail(L"Impossible d'ouvrir la vid\u00e9o source.");
-    }
-
-    pVid->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    pVid->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
-
-    // Try GPU-compatible subtypes: NV12 first (best for HW encode), then P010, YUY2
-    {
-        ComPtr<IMFMediaType> pDecT;
-        MFCreateMediaType(&pDecT);
-        pDecT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-
-        const GUID subtypes[] = { MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoFormat_YUY2 };
-        HRESULT hr = E_FAIL;
-        for (const GUID& st : subtypes) {
-            pDecT->SetGUID(MF_MT_SUBTYPE, st);
-            hr = pVid->SetCurrentMediaType(
-                     (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, pDecT.Get());
-            if (SUCCEEDED(hr)) break;
-        }
-        if (FAILED(hr)) return Fail(L"Impossible de d\u00e9coder la vid\u00e9o.");
-    }
-
-    ComPtr<IMFMediaType> pVidActual;
-    pVid->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pVidActual);
-    if (!pVidActual) return Fail(L"Erreur lecture type vid\u00e9o.");
-
-    UINT32 vidW = 0, vidH = 0;
-    MFGetAttributeSize(pVidActual.Get(), MF_MT_FRAME_SIZE, &vidW, &vidH);
-    UINT32 frNum = 0, frDen = 1;
-    MFGetAttributeRatio(pVidActual.Get(), MF_MT_FRAME_RATE, &frNum, &frDen);
-    if (frNum == 0) {
-        frNum = 30;
-        frDen = 1;
-    }
-
     // ── 2. Audio source reader ───────────────────────────────────────────────
-    ComPtr<IMFSourceReader> pAud =
-        OpenAudioReader(params->audioPath, params->audioStart, preset.audChannels);
-    if (!pAud) return Fail(L"Impossible de d\u00e9coder l'audio.");
     LONGLONG audPosInRange = 0;
 
     // ── 3. Sink writer ───────────────────────────────────────────────────────
-    ComPtr<IMFSinkWriter> pW;
-    {
-        ComPtr<IMFAttributes> pA;
-        MFCreateAttributes(&pA, 3);
-        pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-        pA->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
-        if (pDevMgr)
-            pA->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, pDevMgr.Get());
-
-        if (FAILED(MFCreateSinkWriterFromURL(
-                       params->outputPath.c_str(), nullptr, pA.Get(), &pW)))
-            return Fail(L"Impossible de cr\u00e9er le fichier de sortie.");
-    }
 
     // ── 4. Video output stream (H.264) ───────────────────────────────────────
-    UINT32 outW = vidW, outH = vidH;
-
-    // Swap the preset bounding box for portrait videos so the limit that
-    // was intended for width applies to height and vice-versa.
-    UINT32 maxW = preset.maxWidth, maxH = preset.maxHeight;
-    if (vidH > vidW && maxW > 0 && maxH > 0) std::swap(maxW, maxH);
-
-    if (maxW > 0 || maxH > 0) {
-        float scaleW = (maxW > 0 && outW > maxW) ? (float)maxW / outW : 1.0f;
-        float scaleH = (maxH > 0 && outH > maxH) ? (float)maxH / outH : 1.0f;
-        float scale = min(scaleW, scaleH);
-        if (scale < 1.0f) {
-            outW = (UINT32)(outW * scale);
-            outH = (UINT32)(outH * scale);
-        }
-    }
-    // H.264 requires even dimensions
-    outW = (outW & ~1u);
-    if (outW == 0) outW = 2;
-    outH = (outH & ~1u);
-    if (outH == 0) outH = 2;
-
-    UINT32 srcBitrate = MF_GetVideoBitrate(params->videoPath);
-    UINT32 vBitrate = (preset.maxVidBitrate == 0)
-                      ? ((srcBitrate > 0) ? srcBitrate : 4000000)
-                      : ((srcBitrate > 0) ? min(preset.maxVidBitrate, srcBitrate) : preset.maxVidBitrate);
-
-    DWORD vidIdx = 0, audIdx = 1;
-
-    {
-        ComPtr<IMFMediaType> pVidOut;
-        MFCreateMediaType(&pVidOut);
-        pVidOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        pVidOut->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        pVidOut->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        MFSetAttributeSize(pVidOut.Get(), MF_MT_FRAME_SIZE, outW, outH);
-        MFSetAttributeRatio(pVidOut.Get(), MF_MT_FRAME_RATE, frNum, frDen);
-        MFSetAttributeRatio(pVidOut.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        pVidOut->SetUINT32(MF_MT_AVG_BITRATE, vBitrate);
-        pVidOut->SetUINT32(MF_MT_MPEG2_PROFILE, (UINT32)preset.h264Profile);
-
-        if (FAILED(pW->AddStream(pVidOut.Get(), &vidIdx)))
-            return Fail(L"Erreur ajout flux H264.");
-    }
-    if (FAILED(pW->SetInputMediaType(vidIdx, pVidActual.Get(), nullptr)))
-        return Fail(L"Type vid\u00e9o incompatible avec l'encodeur H264.");
 
     // ── 5. Audio output stream (AAC-LC) ─────────────────────────────────────
     {
@@ -467,7 +506,7 @@ static void EncodeThread(std::unique_ptr<EncodeParams> params)
 }
 
 // Trampoline so std::thread can hold a unique_ptr
-static void EncodeThreadEntry(EncodeParams* raw)
+void EncodeThreadEntry(EncodeParams* raw)
 {
     EncodeThread(std::unique_ptr<EncodeParams>(raw));
 }

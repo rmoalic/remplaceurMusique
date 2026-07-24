@@ -27,8 +27,6 @@
 #include <propvarutil.h>
 #include <shlwapi.h>
 #include <codecapi.h>
-#include <d3d11.h>
-#include <d3d11_4.h>
 #include <wrl/client.h>   // ComPtr
 #include "resource.h"
 #include "EncodeThread.hpp"
