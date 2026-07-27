@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <memory>
 #include <cstring>
+#include "VideoEncoder.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -848,11 +849,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             ShowWindow(hP, SW_SHOW);
             TBProgress(0);
 
-            auto* ep = new EncodeParams{
+            auto ep = std::make_unique<EncodeParams>(EncodeParams{
                 video, audio, out, vidStart, vidEnd,
                 audStart, audEnd, g_audioShortMode,
-                g_qualityIdx, g_volumePct / 100.0f, hWnd };
-            std::thread(EncodeThreadEntry, ep).detach();
+                g_qualityIdx, g_volumePct / 100.0f, hWnd });
+            VideoEncoder ve(std::move(ep));
+            ve.Initialize();
+            std::thread([ve = std::move(ve)]() mutable {
+                ve.Run();
+            }).detach();
         }
         break;
     }
