@@ -198,8 +198,9 @@ void VideoEncoder::Run()
 
     PostMessage(m_params->hWnd, WM_ENCODE_PROGRESS, 100, 0);
     m_writer->Finalize();
-
-    PostMessage(m_params->hWnd, WM_ENCODE_DONE, 1, 0);
+    
+    ENCODE_DONE_MSG doneMsg = { true, L""};
+    SendMessage(m_params->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -574,14 +575,19 @@ void VideoEncoder::ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG ma
         (WPARAM)pct, (LPARAM)(LONGLONG)eta);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Error handling
-// ─────────────────────────────────────────────────────────────────────────────
-
 void VideoEncoder::Fail(const wchar_t* msg)
 {
-    DeleteFile(m_params->outputPath.c_str());
-    PostMessage(m_params->hWnd, WM_ENCODE_DONE, 0, 0);
+    const wchar_t* raw = (msg && msg[0]) ? msg : L"Erreur inconnue lors de l'encodage.";
+    std::wstring errmsg(raw);
+
+    if (m_params && !m_params->outputPath.empty()) {
+        DeleteFile(m_params->outputPath.c_str());
+    }
+
+    if (m_params && m_params->hWnd) {
+        ENCODE_DONE_MSG doneMsg = { false, errmsg };
+        SendMessage(m_params->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

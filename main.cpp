@@ -164,13 +164,7 @@ struct UIState {
 };
 static UIState ui;
 
-// Shared between UI thread and encode thread — use atomic / synchronise carefully
-struct EncodeShared {
-    std::atomic<bool> encoding{ false };
-    std::wstring      lastError;      // written by encode thread before WM_ENCODE_DONE,
-    // read by UI thread after — no race (happens-before)
-};
-static EncodeShared enc;
+std::atomic<bool> encoding{ false };
 
 // ---------------------------------------------------------------------------
 // ITaskbarList3 helpers
@@ -795,7 +789,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                                SendDlgItemMessage(hWnd, ID_COMBO_AUDSHORT, CB_GETCURSEL, 0, 0);
         }
         else if (id == ID_BTN_GO) {
-            if (enc.encoding) break;
+            if (encoding) break;
 
             std::wstring video = CtrlText(hWnd, ID_EDIT_VIDEO);
             std::wstring audio = CtrlText(hWnd, ID_EDIT_AUDIO);
@@ -874,11 +868,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_ENCODE_DONE: {
-        enc.encoding = false;
+        encoding = false;
         EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), TRUE);
         ShowWindow(GetDlgItem(hWnd, ID_PROGRESS), SW_HIDE);
-        bool ok = (wParam == 1);
-        if (ok) {
+		ENCODE_DONE_MSG* encMsg = (ENCODE_DONE_MSG*)lParam;
+        if (encMsg->ok) {
             TBProgress(100);
             SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_DONE_STATUS).c_str());
             MessageBox(hWnd, S(IDS_DONE_MSG).c_str(), S(IDS_DONE_TITLE).c_str(), MB_ICONINFORMATION);
@@ -886,7 +880,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         else {
             TBError();
             SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_ERR_STATUS).c_str());
-            MessageBox(hWnd, (S(IDS_ERR_TITLE) + L":\n\n" + enc.lastError).c_str(),
+            MessageBox(hWnd, (S(IDS_ERR_TITLE) + L":\n\n" + encMsg->error).c_str(),
                        S(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
         }
         TBDone();

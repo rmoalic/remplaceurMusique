@@ -4,9 +4,14 @@
 #include <wtypes.h>
 #include "resource.h"
 
-#define WM_ENCODE_DONE      (WM_USER+1)
+#define WM_ENCODE_DONE      (WM_USER+1) // wParam = struct ENCODE_DONE_MSG
 #define WM_WAVEFORM_READY   (WM_USER+2)
-#define WM_ENCODE_PROGRESS  (WM_USER+3)
+#define WM_ENCODE_PROGRESS  (WM_USER+3) // wParam = pct 0-100%
+
+struct ENCODE_DONE_MSG {
+    bool ok;
+    std::wstring error;
+};
 
 enum AudioShortMode {
     ASM_LOOP = 0,
