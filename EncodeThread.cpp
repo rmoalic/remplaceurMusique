@@ -135,9 +135,9 @@ static void WriteAudioSample(
 
 VideoEncoder::VideoEncoder(std::unique_ptr<EncodeParams> params)
     : m_params(std::move(params))
-    , m_preset(&PRESETS[m_params->qualityIdx])
 {
-    m_pcmBytesNum = (LONGLONG)(44100 * m_preset->audChannels * 2);
+    const QualityPreset preset = PRESETS[m_params->qualityIdx];
+    m_pcmBytesNum = (LONGLONG)(44100 * preset.audChannels * 2);
 
     const LONGLONG audioStartHns = (LONGLONG)(m_params->audioStart * 1e7);
     const LONGLONG audioEndHns = (m_params->audioEnd > m_params->audioStart
@@ -156,27 +156,25 @@ VideoEncoder::VideoEncoder(std::unique_ptr<EncodeParams> params)
 
 bool VideoEncoder::Initialize()
 {
-    m_devMgr = CreateD3DManager();          // Step 0 — null is fine, means SW fallback
+    const QualityPreset preset = PRESETS[m_params->qualityIdx];
 
-    m_vid = OpenVideoReader(m_devMgr);   // Step 1
-    
-
-    // Step 2 — audio reader is handed straight into EncodeLoop in Run(),
-    // but we open it here to catch failures early.
-    if (!OpenAudioReaderForJob()) return false;
-
-    m_writer = CreateSinkWriter(m_devMgr);  // Step 3
+    m_devMgr = CreateD3DManager();
+    if (m_devMgr == nullptr) {
+        printf("Impossible de créer le gestionnaire de périphériques D3D11.");
+	}
+    m_vid = OpenVideoReader(m_devMgr, preset.maxWidth, preset.maxHeight);
+    m_writer = CreateSinkWriter(m_devMgr);
     if (!m_writer) return false;
-
-    auto vidIdx = ConfigureVideoStream(*m_vid.get(), m_writer.Get()); // Step 4
+	
+    auto vidIdx = ConfigureVideoStream(*m_vid.get(), m_writer.Get(), preset.maxVidBitrate, preset.h264Profile);
     if (!vidIdx) return false;
     m_vidIdx = vidIdx;
 
-    auto audIdx = ConfigureAudioStream(m_writer.Get());        // Step 5
+    auto audIdx = ConfigureAudioStream(m_writer.Get(), preset.audChannels, preset.audBytesPerSec);
     if (!audIdx) return false;
     m_audIdx = audIdx;
     IMFSourceReader* reader = m_vid->reader.Get();
-    SeekVideoToStart(reader);   // Step 6
+    SeekVideoToStart(reader);
     return true;
 }
 
@@ -243,7 +241,7 @@ static UINT32 ComputeOutputDimension(UINT32 src, UINT32 max)
 }
 
 std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
-    const ComPtr<IMFDXGIDeviceManager>& devMgr)
+    const ComPtr<IMFDXGIDeviceManager>& devMgr, UINT32 max_out_width, UINT32 max_out_height)
 {
     ComPtr<IMFAttributes> pA;
     MFCreateAttributes(&pA, 3);
@@ -292,7 +290,7 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
     if (vid->frNum == 0) { vid->frNum = 30; vid->frDen = 1; }
 
     // Compute scaled output dimensions, swapping the bounding box for portrait video
-    UINT32 maxW = m_preset->maxWidth, maxH = m_preset->maxHeight;
+    UINT32 maxW = max_out_width, maxH = max_out_height;
     if (vid->height > vid->width && maxW > 0 && maxH > 0) std::swap(maxW, maxH);
 
     float scaleW = (maxW > 0 && vid->width > maxW) ? (float)maxW / vid->width : 1.0f;
@@ -321,7 +319,7 @@ ComPtr<IMFSourceReader> VideoEncoder::OpenAudioReaderForJob()
     MFCreateMediaType(&pT);
     pT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     pT->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)m_preset->audChannels);
+    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
     pT->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
     pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     if (FAILED(pR->SetCurrentMediaType(
@@ -368,14 +366,14 @@ ComPtr<IMFSinkWriter> VideoEncoder::CreateSinkWriter(
 // ─────────────────────────────────────────────────────────────────────────────
 
 DWORD VideoEncoder::ConfigureVideoStream(
-    const VideoSourceInfo vid, IMFSinkWriter* writer)
+    const VideoSourceInfo vid, IMFSinkWriter* writer, UINT32 max_vid_bitrate, UINT32 h264Profile)
 {
     UINT32 srcBitrate = MF_GetVideoBitrate(m_params->videoPath);
-    UINT32 vBitrate = (m_preset->maxVidBitrate == 0)
+    UINT32 vBitrate = (max_vid_bitrate == 0)
         ? ((srcBitrate > 0) ? srcBitrate : 4000000u)
         : ((srcBitrate > 0)
-            ? min(m_preset->maxVidBitrate, srcBitrate)
-            : m_preset->maxVidBitrate);
+            ? min(max_vid_bitrate, srcBitrate)
+            : max_vid_bitrate);
 
     ComPtr<IMFMediaType> pOut;
     MFCreateMediaType(&pOut);
@@ -386,7 +384,7 @@ DWORD VideoEncoder::ConfigureVideoStream(
     MFSetAttributeRatio(pOut.Get(), MF_MT_FRAME_RATE, vid.frNum, vid.frDen);
     MFSetAttributeRatio(pOut.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     pOut->SetUINT32(MF_MT_AVG_BITRATE, vBitrate);
-    pOut->SetUINT32(MF_MT_MPEG2_PROFILE, (UINT32)m_preset->h264Profile);
+    pOut->SetUINT32(MF_MT_MPEG2_PROFILE, h264Profile);
 
     DWORD idx = 0;
     if (FAILED(writer->AddStream(pOut.Get(), &idx))) {
@@ -406,7 +404,7 @@ DWORD VideoEncoder::ConfigureVideoStream(
 // Step 5 — AAC audio output stream
 // ─────────────────────────────────────────────────────────────────────────────
 
-DWORD VideoEncoder::ConfigureAudioStream(IMFSinkWriter* writer)
+DWORD VideoEncoder::ConfigureAudioStream(IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec)
 {
     // Output: AAC-LC
     ComPtr<IMFMediaType> pOut;
@@ -415,8 +413,8 @@ DWORD VideoEncoder::ConfigureAudioStream(IMFSinkWriter* writer)
     pOut->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
     pOut->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     pOut->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    pOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)m_preset->audChannels);
-    pOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, m_preset->audBytesPerSec);
+    pOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, nb_channels);
+    pOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytes_per_sec);
     pOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29); // AAC-LC
 
     DWORD idx = 0;
@@ -432,7 +430,7 @@ DWORD VideoEncoder::ConfigureAudioStream(IMFSinkWriter* writer)
     pIn->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
     pIn->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     pIn->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    pIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, (UINT32)m_preset->audChannels);
+    pIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
 
     if (FAILED(writer->SetInputMediaType(idx, pIn.Get(), nullptr))) {
         Fail(L"Erreur configuration AAC. (Windows 7+)");

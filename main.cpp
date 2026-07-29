@@ -833,7 +833,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             std::wstring out = BrowseSave(hWnd, std::wstring(PathFindFileName(base)) + L"_music.mp4");
             if (out.empty()) break;
 
-            enc.encoding = true;
+            encoding = true;
             EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), FALSE);
             wchar_t buf[256] = {};
             swprintf_s(buf, LoadStr(IDS_ENCODING).c_str(), 0, L"00:00:00");
@@ -871,7 +871,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         encoding = false;
         EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), TRUE);
         ShowWindow(GetDlgItem(hWnd, ID_PROGRESS), SW_HIDE);
-		ENCODE_DONE_MSG* encMsg = (ENCODE_DONE_MSG*)lParam;
+		ENCODE_DONE_MSG* encMsg = (ENCODE_DONE_MSG*)wParam;
         if (encMsg->ok) {
             TBProgress(100);
             SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_DONE_STATUS).c_str());
