@@ -20,12 +20,14 @@ using namespace Microsoft::WRL;
 #include "EncodeThread.hpp"
 #include "Encode.hpp"
 
-static LONGLONG WriteSilenceChunk(
+static bool WriteSilenceChunk(
     IMFSinkWriter* pW, DWORD audIdx,
     LONGLONG ts, LONGLONG durationHns,
-    LONGLONG bytesPerHns_num, LONGLONG bytesPerHns_den)
+    LONGLONG bytesPerHns_num, LONGLONG bytesPerHns_den,
+    LONGLONG* writtenHns)
 {
-    if (durationHns <= 0) return 0;
+    *writtenHns = 0;
+    if (durationHns <= 0) return true;
     LONGLONG nbytes = (durationHns * bytesPerHns_num + bytesPerHns_den - 1) / bytesPerHns_den;
     nbytes = (nbytes + 3) & ~3LL;
     const LONGLONG MAX_BYTES = 1024 * 1024;
@@ -34,24 +36,25 @@ static LONGLONG WriteSilenceChunk(
         nbytes = (nbytes + 3) & ~3LL;
     }
     LONGLONG realHns = nbytes * bytesPerHns_den / bytesPerHns_num;
-    if (realHns <= 0) return 0;
+    if (realHns <= 0) return false;
 
     ComPtr<IMFMediaBuffer> pBuf;
-    if (FAILED(MFCreateMemoryBuffer((DWORD)nbytes, &pBuf))) return 0;
+    if (FAILED(MFCreateMemoryBuffer((DWORD)nbytes, &pBuf))) return false;
     BYTE* d = nullptr;
     DWORD mL = 0;
-    pBuf->Lock(&d, &mL, nullptr);
+    if (FAILED(pBuf->Lock(&d, &mL, nullptr))) return false;
     memset(d, 0, (size_t)nbytes);
     pBuf->Unlock();
     pBuf->SetCurrentLength((DWORD)nbytes);
 
     ComPtr<IMFSample> pS;
-    MFCreateSample(&pS);
-    pS->AddBuffer(pBuf.Get());
-    pS->SetSampleTime(ts);
-    pS->SetSampleDuration(realHns);
-    pW->WriteSample(audIdx, pS.Get());
-    return realHns;
+    if (FAILED(MFCreateSample(&pS)) ||
+        FAILED(pS->AddBuffer(pBuf.Get())) ||
+        FAILED(pS->SetSampleTime(ts)) ||
+        FAILED(pS->SetSampleDuration(realHns)) ||
+        FAILED(pW->WriteSample(audIdx, pS.Get()))) return false;
+    *writtenHns = realHns;
+    return true;
 }
 
 double MF_GetDuration(const std::wstring& path)
@@ -81,48 +84,80 @@ UINT32 MF_GetVideoBitrate(const std::wstring& path)
 }
 
 
-static void WriteAudioSample(
+static HRESULT WriteAudioSample(
     IMFSinkWriter* pW, DWORD audIdx,
-    IMFSample* pSrc, LONGLONG ts, float vol)
+    IMFSample* pSrc, LONGLONG ts, float vol, LONGLONG maxDurationHns,
+    UINT32 blockAlignment, LONGLONG* writtenHns)
 {
-    if (vol == 1.0f) {
-        pSrc->SetSampleTime(ts);
-        pW->WriteSample(audIdx, pSrc);
-        return;
+    *writtenHns = 0;
+    LONGLONG srcDuration = 0;
+    // Some source readers omit MF_SAMPLE_DURATION. Keep the same 20 ms
+    // fallback used by ProcessAudio, and attach it before handing the sample
+    // to the sink writer.
+    if (FAILED(pSrc->GetSampleDuration(&srcDuration)) || srcDuration <= 0) {
+        srcDuration = 200000LL;
+        HRESULT hr = pSrc->SetSampleDuration(srcDuration);
+        if (FAILED(hr)) return hr;
     }
+    const bool trim = maxDurationHns < srcDuration;
+    if (!trim && vol == 1.0f) {
+        HRESULT hr = pSrc->SetSampleTime(ts);
+        if (FAILED(hr)) return hr;
+        hr = pW->WriteSample(audIdx, pSrc);
+        if (FAILED(hr)) return hr;
+        *writtenHns = srcDuration;
+        return S_OK;
+    }
+
     ComPtr<IMFMediaBuffer> pIn;
-    if (FAILED(pSrc->ConvertToContiguousBuffer(&pIn))) return;
+    HRESULT hr = pSrc->ConvertToContiguousBuffer(&pIn);
+    if (FAILED(hr)) return hr;
 
     BYTE* pInD = nullptr;
     DWORD lenIn = 0;
-    pIn->Lock(&pInD, nullptr, &lenIn);
+    hr = pIn->Lock(&pInD, nullptr, &lenIn);
+    if (FAILED(hr)) return hr;
+    const DWORD lenOut = trim
+        ? (DWORD)((((LONGLONG)lenIn * maxDurationHns / srcDuration) / blockAlignment) * blockAlignment)
+        : lenIn;
+    // A range can end between two PCM frames. There is nothing valid to
+    // encode in that fragment; report a normal, empty write to the caller.
+    if (lenOut == 0) { pIn->Unlock(); return S_FALSE; }
 
     ComPtr<IMFMediaBuffer> pOut;
-    MFCreateMemoryBuffer(lenIn, &pOut);
+    hr = MFCreateMemoryBuffer(lenOut, &pOut);
+    if (FAILED(hr)) { pIn->Unlock(); return hr; }
     BYTE* pOutD = nullptr;
     DWORD mxO = 0;
-    pOut->Lock(&pOutD, &mxO, nullptr);
+    hr = pOut->Lock(&pOutD, &mxO, nullptr);
+    if (FAILED(hr)) { pIn->Unlock(); return hr; }
 
     auto* s = (int16_t*)pInD;
     auto* d = (int16_t*)pOutD;
-    int n = lenIn / 2;
+    int n = lenOut / 2;
     for (int i = 0; i < n; i++) {
         float v = s[i] * vol;
         d[i] = (int16_t)(v > 32767.f ? 32767.f : v < -32768.f ? -32768.f : v);
     }
 
     pOut->Unlock();
-    pOut->SetCurrentLength(lenIn);
+    pOut->SetCurrentLength(lenOut);
     pIn->Unlock();
 
     ComPtr<IMFSample> pDst;
-    MFCreateSample(&pDst);
-    pDst->AddBuffer(pOut.Get());
-    LONGLONG dur = 0;
-    pSrc->GetSampleDuration(&dur);
-    pDst->SetSampleTime(ts);
-    pDst->SetSampleDuration(dur);
-    pW->WriteSample(audIdx, pDst.Get());
+    const LONGLONG outDuration = trim ? (srcDuration * lenOut / lenIn) : srcDuration;
+    hr = MFCreateSample(&pDst);
+    if (FAILED(hr)) return hr;
+    hr = pDst->AddBuffer(pOut.Get());
+    if (FAILED(hr)) return hr;
+    hr = pDst->SetSampleTime(ts);
+    if (FAILED(hr)) return hr;
+    hr = pDst->SetSampleDuration(outDuration);
+    if (FAILED(hr)) return hr;
+    hr = pW->WriteSample(audIdx, pDst.Get());
+    if (FAILED(hr)) return hr;
+    *writtenHns = outDuration;
+    return S_OK;
 }
 
 
@@ -148,6 +183,13 @@ VideoEncoder::VideoEncoder(std::unique_ptr<EncodeParams> params)
     m_maxDurHns = (m_params->videoEnd > m_params->videoStart && m_params->videoEnd > 0.0)
         ? (LONGLONG)((m_params->videoEnd - m_params->videoStart) * 1e7)
         : LLONG_MAX;
+
+    const LONGLONG sourceDurHns = (LONGLONG)(MF_GetDuration(m_params->videoPath) * 1e7);
+    if (sourceDurHns > 0) {
+        m_outputDurHns = max(0LL, sourceDurHns - (LONGLONG)(m_params->videoStart * 1e7));
+    }
+    if (m_maxDurHns != LLONG_MAX)
+        m_outputDurHns = min(m_outputDurHns, m_maxDurHns);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,6 +222,7 @@ bool VideoEncoder::Initialize()
     m_audIdx = audIdx;
     IMFSourceReader* reader = m_vid->reader.Get();
     SeekVideoToStart(reader);
+    if (m_failed) return false;
     return true;
 }
 
@@ -197,11 +240,14 @@ void VideoEncoder::Run()
     while (!loop.vidDone)
     {
         ProcessVideoFrame(loop, m_writer.Get(), m_vidIdx);
-        ProcessAudio(loop, m_writer.Get(), m_audIdx, m_audioRangeHns, m_maxDurHns);
+        if (m_failed) return;
+        ProcessAudio(loop, m_writer.Get(), m_audIdx, m_audioRangeHns, m_outputDurHns);
+        if (m_failed) return;
     }
 
     PostMessage(m_params->hWnd, WM_ENCODE_PROGRESS, 100, 0);
-    m_writer->Finalize();
+    if (FAILED(m_writer->Finalize()))
+        return Fail(L"Impossible de finaliser le fichier MP4.");
     
     ENCODE_DONE_MSG doneMsg = { true, L""};
     SendMessage(m_params->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
@@ -471,7 +517,8 @@ void VideoEncoder::SeekVideoToStart(IMFSourceReader* reader)
     PROPVARIANT v;
     v.vt = VT_I8;
     v.hVal.QuadPart = (LONGLONG)(m_params->videoStart * 1e7);
-    reader->SetCurrentPosition(GUID_NULL, v);
+    if (FAILED(reader->SetCurrentPosition(GUID_NULL, v)))
+        Fail(L"Impossible de positionner la vidéo source.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -488,7 +535,11 @@ bool VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DW
         (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
         0, nullptr, &flags, &ts, &pS);
 
-    if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM))
+    if (FAILED(hr)) {
+        Fail(L"Erreur pendant la lecture de la vidéo.");
+        return false;
+    }
+    if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
         return loop.vidDone = true, false;
 
     if (!pS)
@@ -505,8 +556,10 @@ bool VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DW
     if (m_maxDurHns != LLONG_MAX && rel >= m_maxDurHns)
         return loop.vidDone = true, false;
 
-    pS->SetSampleTime(rel);
-    writer->WriteSample(vidIdx, pS.Get());
+    if (FAILED(pS->SetSampleTime(rel)) || FAILED(writer->WriteSample(vidIdx, pS.Get()))) {
+        Fail(L"Erreur pendant l'écriture de la vidéo.");
+        return false;
+    }
     loop.vidLastTs = rel;
 
     if (m_maxDurHns != LLONG_MAX && rel - loop.lastProgressHns > 5000000LL)
@@ -516,11 +569,11 @@ bool VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DW
 }
 
 void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx,
-    LONGLONG audioRangeHns, LONGLONG maxDurHns)
+    LONGLONG audioRangeHns, LONGLONG outputDurHns)
 {
     const LONGLONG target = min(
         loop.vidLastTs + 2000000LL,
-        maxDurHns == LLONG_MAX ? loop.vidLastTs + 2000000LL : maxDurHns);
+        outputDurHns == LLONG_MAX ? loop.vidLastTs + 2000000LL : outputDurHns);
 
     while (loop.audWritten < target)
     {
@@ -529,10 +582,14 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
             // Write one chunk of silence and re-evaluate next iteration
             const LONGLONG need = target - loop.audWritten;
             const LONGLONG chunk = min(need, 2000000LL);
-            const LONGLONG written = WriteSilenceChunk(
+            LONGLONG written = 0;
+            if (!WriteSilenceChunk(
                 writer, audIdx, loop.audWritten,
-                chunk, m_pcmBytesNum, kPcmHnsDen);
-            if (written <= 0) break;
+                chunk, m_pcmBytesNum, kPcmHnsDen, &written)) {
+                Fail(L"Erreur pendant l'écriture du silence audio.");
+                return;
+            }
+            if (written <= 0) return;
             loop.audWritten += written;
             continue;
         }
@@ -543,23 +600,51 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
             (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
             0, nullptr, &flags, nullptr, &pS);
 
-        const bool eof = FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM) || !pS;
+        if (FAILED(hr)) {
+            Fail(L"Erreur pendant la lecture de l'audio.");
+            return;
+        }
+        const bool eof = flags & MF_SOURCE_READERF_ENDOFSTREAM;
+
+        if (!pS && !eof) continue;
 
         if (!eof)
         {
             LONGLONG dur = 0;
             if (FAILED(pS->GetSampleDuration(&dur)) || dur <= 0) dur = 200000LL;
 
-            if (audioRangeHns != LLONG_MAX && loop.audPosInRange + dur > audioRangeHns)
-            {
+            const LONGLONG rangeRemaining = audioRangeHns == LLONG_MAX
+                ? dur : max(0LL, audioRangeHns - loop.audPosInRange);
+            const LONGLONG outputRemaining = outputDurHns == LLONG_MAX
+                ? dur : max(0LL, outputDurHns - loop.audWritten);
+            const LONGLONG writeLimit = min(dur, min(rangeRemaining, outputRemaining));
+            if (writeLimit <= 0) {
                 loop.audEOF = true;
-            }
-            else
-            {
-                WriteAudioSample(writer, audIdx, pS.Get(), loop.audWritten,
-                    m_params->volumeScale);
-                loop.audWritten += dur;
-                loop.audPosInRange += dur;
+            } else {
+                LONGLONG written = 0;
+                const HRESULT writeHr = WriteAudioSample(writer, audIdx, pS.Get(), loop.audWritten,
+                    m_params->volumeScale, writeLimit, m_aud->nbChannels * 2, &written);
+                if (FAILED(writeHr)) {
+                    wchar_t msg[128] = {};
+                    swprintf_s(msg, L"Erreur pendant l'écriture de l'audio (0x%08X).",
+                               static_cast<UINT32>(writeHr));
+                    Fail(msg);
+                    return;
+                }
+                if (writeHr == S_FALSE) {
+                    // Do not loop forever on the sub-frame remainder at the
+                    // end of the output. For an audio-selection boundary,
+                    // mark EOF so the loop/silence policy takes over.
+                    if (outputDurHns != LLONG_MAX && outputRemaining < dur) {
+                        loop.audWritten = outputDurHns;
+                        return;
+                    }
+                    loop.audEOF = true;
+                } else {
+                    loop.audWritten += written;
+                    loop.audPosInRange += written;
+                    if (written < dur) loop.audEOF = true;
+                }
             }
         }
 
@@ -601,6 +686,8 @@ void VideoEncoder::ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG ma
 
 void VideoEncoder::Fail(const wchar_t* msg)
 {
+    if (m_failed) return;
+    m_failed = true;
     const wchar_t* raw = (msg && msg[0]) ? msg : L"Erreur inconnue lors de l'encodage.";
     std::wstring errmsg(raw);
 

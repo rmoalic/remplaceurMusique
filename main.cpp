@@ -847,10 +847,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 video, audio, out, vidStart, vidEnd,
                 audStart, audEnd, g_audioShortMode,
                 g_qualityIdx, g_volumePct / 100.0f, hWnd });
-            VideoEncoder ve(std::move(ep));
-            ve.Initialize();
-            std::thread([ve = std::move(ve)]() mutable {
-                ve.Run();
+            std::thread([ep = std::move(ep)]() mutable {
+                VideoEncoder ve(std::move(ep));
+                if (ve.Initialize()) ve.Run();
             }).detach();
         }
         break;

@@ -113,7 +113,7 @@ private:
 
     // Write audio to stay ~200 ms ahead of video; handles looping + silence.
     void ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx,
-        LONGLONG audioRangeHns, LONGLONG maxDurHns);
+        LONGLONG audioRangeHns, LONGLONG outputDurHns);
 
     // Progress notification (only called when maxDurHns is known)
     void ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG maxDurHns);
@@ -132,6 +132,7 @@ private:
 
     // Precomputed from params (read-only after ctor)
     LONGLONG m_maxDurHns = LLONG_MAX;
+    LONGLONG m_outputDurHns = LLONG_MAX;
     LONGLONG m_audioRangeHns = LLONG_MAX;
     LONGLONG m_pcmBytesNum = 0;
     static constexpr LONGLONG kPcmHnsDen = 10000000LL;
@@ -139,4 +140,5 @@ private:
     // Kept for Run() to pass into ProcessVideoFrame
     std::unique_ptr<VideoSourceInfo> m_vid;
     std::unique_ptr<AudioSourceInfo> m_aud;
+    bool m_failed = false;
 };
