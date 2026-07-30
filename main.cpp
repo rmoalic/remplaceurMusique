@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <memory>
 #include <cstring>
+#include <iterator>
 #include "VideoEncoder.h"
 
 using Microsoft::WRL::ComPtr;
@@ -165,6 +166,16 @@ struct UIState {
 static UIState ui;
 
 std::atomic<bool> encoding{ false };
+static std::atomic<bool> g_appClosing{ false };
+static std::atomic_uint64_t g_waveformGeneration{ 0 };
+static std::thread g_encodeThread;
+static std::shared_ptr<std::atomic_bool> g_encodeCancel;
+static std::vector<std::thread> g_waveformThreads;
+
+struct WaveformResult {
+    uint64_t generation;
+    std::vector<float> values;
+};
 
 // ---------------------------------------------------------------------------
 // ITaskbarList3 helpers
@@ -224,11 +235,11 @@ static void ErrBox(HWND h, UINT msgId, UINT titleId = IDS_ERR_TITLE_VAL)
 // ---------------------------------------------------------------------------
 // Waveform extraction thread
 // ---------------------------------------------------------------------------
-static void ExtractWaveformThread(std::wstring path, HWND hWnd)
+static void ExtractWaveformThread(std::wstring path, HWND hWnd, uint64_t generation, double durationSecs)
 {
     ComPtr<IMFSourceReader> pR;
     if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &pR))) {
-        PostMessage(hWnd, WM_WAVEFORM_READY, 0, 0);
+        PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, 0);
         return;
     }
     pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
@@ -243,9 +254,14 @@ static void ExtractWaveformThread(std::wstring path, HWND hWnd)
     pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     pR->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get());
 
-    std::vector<int16_t> pcm;
-    pcm.reserve(8000 * 300);
+    auto* result = new WaveformResult{ generation, std::vector<float>(WAVE_SAMPLES, 0.f) };
+    const uint64_t totalSamples = durationSecs > 0.0
+        ? static_cast<uint64_t>(durationSecs * 8000.0) : 0;
+    const uint64_t samplesPerBucket = totalSamples > 0
+        ? std::max<uint64_t>(1, (totalSamples + WAVE_SAMPLES - 1) / WAVE_SAMPLES) : 1;
+    uint64_t sampleIndex = 0;
     while (true) {
+        if (g_appClosing || generation != g_waveformGeneration) { delete result; return; }
         ComPtr<IMFSample> pS;
         DWORD flags = 0;
         HRESULT hr = pR->ReadSample(
@@ -260,23 +276,18 @@ static void ExtractWaveformThread(std::wstring path, HWND hWnd)
             if (SUCCEEDED(pB->Lock(&d, nullptr, &len))) {
                 int n = len / 2;
                 auto* s16 = reinterpret_cast<int16_t*>(d);
-                for (int i = 0; i < n; i++) pcm.push_back(s16[i]);
+                for (int i = 0; i < n; i++, sampleIndex++) {
+                    const size_t bucket = std::min<size_t>(WAVE_SAMPLES - 1, sampleIndex / samplesPerBucket);
+                    const float amplitude = std::abs((float)s16[i]) / 32768.f;
+                    result->values[bucket] = std::max(result->values[bucket], std::min(1.f, amplitude));
+                }
                 pB->Unlock();
             }
         }
     }
 
-    auto* wf = new std::vector<float>(WAVE_SAMPLES, 0.f);
-    if (!pcm.empty()) {
-        size_t chunk = std::max<size_t>(1, pcm.size() / WAVE_SAMPLES);
-        for (int i = 0; i < WAVE_SAMPLES; i++) {
-            size_t fr = i * chunk, to = std::min(fr + chunk, pcm.size());
-            float pk = 0;
-            for (size_t j = fr; j < to; j++) pk = std::max(pk, std::abs((float)pcm[j]));
-            (*wf)[i] = std::min(1.f, pk / 32768.f);
-        }
-    }
-    PostMessage(hWnd, WM_WAVEFORM_READY, 0, (LPARAM)wf);
+    if (!g_appClosing && PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, (LPARAM)result)) return;
+    delete result;
 }
 
 
@@ -464,13 +475,14 @@ static LRESULT CALLBACK WaveformWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
 // ---------------------------------------------------------------------------
 static std::wstring BrowseFile(HWND hOwner, bool isVideo)
 {
-    wchar_t buf[MAX_PATH * 2] = {};
+    constexpr DWORD kDialogPathChars = 32768;
+    std::vector<wchar_t> buf(kDialogPathChars, L'\0');
     OPENFILENAME ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hOwner;
-    ofn.lpstrFile = buf;
-    ofn.nMaxFile = MAX_PATH * 2;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = kDialogPathChars;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     if (isVideo) {
         ofn.lpstrFilter = L"Video\0*.mp4;*.mov;*.avi;*.mkv;*.m4v;*.wmv\0All\0*.*\0";
         ofn.lpstrTitle = L"Video";
@@ -479,22 +491,33 @@ static std::wstring BrowseFile(HWND hOwner, bool isVideo)
         ofn.lpstrFilter = L"Audio\0*.mp3;*.wav;*.aac;*.flac;*.ogg;*.m4a;*.wma\0All\0*.*\0";
         ofn.lpstrTitle = L"Music";
     }
-    return GetOpenFileName(&ofn) ? buf : L"";
+    return GetOpenFileName(&ofn) ? buf.data() : L"";
 }
+
+static bool SameFilePath(const std::wstring& a, const std::wstring& b)
+{
+    wchar_t fullA[32768] = {}, fullB[32768] = {};
+    DWORD lenA = GetFullPathNameW(a.c_str(), (DWORD)std::size(fullA), fullA, nullptr);
+    DWORD lenB = GetFullPathNameW(b.c_str(), (DWORD)std::size(fullB), fullB, nullptr);
+    if (lenA == 0 || lenA >= std::size(fullA) || lenB == 0 || lenB >= std::size(fullB)) return false;
+    return CompareStringOrdinal(fullA, -1, fullB, -1, TRUE) == CSTR_EQUAL;
+}
+
 static std::wstring BrowseSave(HWND hOwner, const std::wstring& def)
 {
-    wchar_t buf[MAX_PATH * 2] = {};
-    wcscpy_s(buf, def.c_str());
+    constexpr DWORD kDialogPathChars = 32768;
+    std::vector<wchar_t> buf(kDialogPathChars, L'\0');
+    wcsncpy_s(buf.data(), buf.size(), def.c_str(), _TRUNCATE);
     OPENFILENAME ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hOwner;
-    ofn.lpstrFile = buf;
-    ofn.nMaxFile = MAX_PATH * 2;
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = kDialogPathChars;
     ofn.lpstrFilter = L"MP4\0*.mp4\0All\0*.*\0";
     ofn.lpstrDefExt = L"mp4";
     ofn.lpstrTitle = L"Save as";
-    ofn.Flags = OFN_OVERWRITEPROMPT;
-    return GetSaveFileName(&ofn) ? buf : L"";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_EXPLORER;
+    return GetSaveFileName(&ofn) ? buf.data() : L"";
 }
 
 // ---------------------------------------------------------------------------
@@ -533,7 +556,13 @@ static void ApplyAudioPath(HWND hWnd, const std::wstring& p)
         SetDlgItemText(hWnd, ID_STATIC_AUD_DUR,
                        Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
     InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
-    std::thread([p, hWnd] { ExtractWaveformThread(p, hWnd); }).detach();
+    const uint64_t generation = ++g_waveformGeneration;
+    g_waveformThreads.emplace_back([p, hWnd, generation, dur] {
+        const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(coHr)) return;
+        ExtractWaveformThread(p, hWnd, generation, dur);
+        CoUninitialize();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -712,16 +741,17 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         HDROP hDrop = (HDROP)wParam;
         UINT n = DragQueryFile(hDrop, 0xFFFFFFFF, nullptr, 0);
         for (UINT i = 0; i < n; i++) {
-            wchar_t buf[MAX_PATH * 2] = {};
-            DragQueryFile(hDrop, i, buf, MAX_PATH * 2);
-            std::wstring ext = buf;
+            const UINT cch = DragQueryFile(hDrop, i, nullptr, 0);
+            std::vector<wchar_t> buf(cch + 1, L'\0');
+            DragQueryFile(hDrop, i, buf.data(), cch + 1);
+            std::wstring ext = buf.data();
             size_t dot = ext.rfind(L'.');
             if (dot != std::wstring::npos) ext = ext.substr(dot + 1);
             for (auto& c : ext) c = towlower(c);
             bool isV = (ext == L"mp4" || ext == L"mov" || ext == L"avi" || ext == L"mkv" || ext == L"m4v" || ext == L"wmv");
             bool isA = (ext == L"mp3" || ext == L"wav" || ext == L"aac" || ext == L"flac" || ext == L"ogg" || ext == L"m4a" || ext == L"wma");
-            if (isV) ApplyVideoPath(hWnd, buf);
-            else if (isA) ApplyAudioPath(hWnd, buf);
+            if (isV) ApplyVideoPath(hWnd, buf.data());
+            else if (isA) ApplyAudioPath(hWnd, buf.data());
         }
         DragFinish(hDrop);
         break;
@@ -827,11 +857,17 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 break;
             }
 
-            wchar_t base[MAX_PATH];
-            wcscpy_s(base, video.c_str());
-            PathRemoveExtension(base);
-            std::wstring out = BrowseSave(hWnd, std::wstring(PathFindFileName(base)) + L"_music.mp4");
+            std::wstring base = video;
+            const size_t slash = base.find_last_of(L"\\/");
+            const size_t dot = base.find_last_of(L'.');
+            if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) base.resize(dot);
+            std::wstring out = BrowseSave(hWnd, std::wstring(PathFindFileName(base.c_str())) + L"_music.mp4");
             if (out.empty()) break;
+            if (SameFilePath(out, video) || SameFilePath(out, audio)) {
+                MessageBox(hWnd, L"Le fichier de sortie doit être différent des fichiers source.",
+                           S(IDS_ERR_TITLE).c_str(), MB_ICONWARNING);
+                break;
+            }
 
             encoding = true;
             EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), FALSE);
@@ -846,11 +882,21 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto ep = std::make_unique<EncodeParams>(EncodeParams{
                 video, audio, out, vidStart, vidEnd,
                 audStart, audEnd, g_audioShortMode,
-                g_qualityIdx, g_volumePct / 100.0f, hWnd });
-            std::thread([ep = std::move(ep)]() mutable {
+                g_qualityIdx, g_volumePct / 100.0f, hWnd,
+                std::make_shared<std::atomic_bool>(false) });
+            if (g_encodeThread.joinable()) g_encodeThread.join();
+            g_encodeCancel = ep->cancelRequested;
+            g_encodeThread = std::thread([ep = std::move(ep)]() mutable {
+                const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                if (FAILED(coHr)) {
+                    ENCODE_DONE_MSG doneMsg = { false, L"Impossible d'initialiser COM pour l'encodage." };
+                    SendMessage(ep->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
+                    return;
+                }
                 VideoEncoder ve(std::move(ep));
                 if (ve.Initialize()) ve.Run();
-            }).detach();
+                CoUninitialize();
+            });
         }
         break;
     }
@@ -887,17 +933,23 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_WAVEFORM_READY: {
-        auto* wf = (std::vector<float>*)lParam;
-        if (wf) {
-            ui.waveform = std::move(*wf);
-            delete wf;
+        auto* result = (WaveformResult*)lParam;
+        if (result) {
+            if (result->generation == g_waveformGeneration)
+                ui.waveform = std::move(result->values);
+            delete result;
         }
-        ui.waveformReady = true;
-        InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
+        if ((uint64_t)wParam == g_waveformGeneration) {
+            ui.waveformReady = true;
+            InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
+        }
         break;
     }
 
     case WM_DESTROY:
+        g_appClosing = true;
+        ++g_waveformGeneration;
+        if (g_encodeCancel) g_encodeCancel->store(true);
         DragAcceptFiles(hWnd, FALSE);
         ui.pTaskbar.Reset();
         DeleteObject(ui.hFontUI);
@@ -959,6 +1011,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    if (g_encodeThread.joinable()) g_encodeThread.join();
+    for (auto& worker : g_waveformThreads)
+        if (worker.joinable()) worker.join();
     MFShutdown();
     CoUninitialize();
     return (int)msg.wParam;

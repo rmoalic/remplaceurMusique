@@ -20,6 +20,16 @@ using namespace Microsoft::WRL;
 #include "EncodeThread.hpp"
 #include "Encode.hpp"
 
+static void WarnMF(const wchar_t* message, HRESULT hr = S_OK)
+{
+    wchar_t buffer[256] = {};
+    if (FAILED(hr))
+        swprintf_s(buffer, L"[Media Foundation warning] %s (0x%08X)\n", message, static_cast<UINT32>(hr));
+    else
+        swprintf_s(buffer, L"[Media Foundation warning] %s\n", message);
+    OutputDebugStringW(buffer);
+}
+
 static bool WriteSilenceChunk(
     IMFSinkWriter* pW, DWORD audIdx,
     LONGLONG ts, LONGLONG durationHns,
@@ -201,9 +211,8 @@ bool VideoEncoder::Initialize()
     const QualityPreset preset = PRESETS[m_params->qualityIdx];
 
     m_devMgr = CreateD3DManager();
-    if (m_devMgr == nullptr) {
-        printf("Impossible de créer le gestionnaire de périphériques D3D11.");
-	}
+    if (m_devMgr == nullptr)
+        WarnMF(L"Accélération matérielle indisponible ; utilisation du mode logiciel.");
     m_vid = OpenVideoReader(m_devMgr, preset.maxWidth, preset.maxHeight);
 	if (!m_vid) return false;
 
@@ -228,6 +237,7 @@ bool VideoEncoder::Initialize()
 
 void VideoEncoder::Run()
 {
+    if (IsCancellationRequested()) return Cancel();
     if (FAILED(m_writer->BeginWriting()))
         return Fail(L"Erreur démarrage écriture MP4.");
 
@@ -239,6 +249,7 @@ void VideoEncoder::Run()
 
     while (!loop.vidDone)
     {
+        if (IsCancellationRequested()) return Cancel();
         ProcessVideoFrame(loop, m_writer.Get(), m_vidIdx);
         if (m_failed) return;
         ProcessAudio(loop, m_writer.Get(), m_audIdx, m_audioRangeHns, m_outputDurHns);
@@ -297,11 +308,17 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
     const ComPtr<IMFDXGIDeviceManager>& devMgr, UINT32 max_out_width, UINT32 max_out_height)
 {
     ComPtr<IMFAttributes> pA;
-    MFCreateAttributes(&pA, 3);
-    pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-    pA->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
-    if (devMgr)
-        pA->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, devMgr.Get());
+    HRESULT attrHr = MFCreateAttributes(&pA, 3);
+    if (FAILED(attrHr)) {
+        WarnMF(L"Attributs du lecteur vidéo indisponibles ; configuration par défaut utilisée.", attrHr);
+    } else {
+        if (FAILED(attrHr = pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE)))
+            WarnMF(L"Transformations matérielles vidéo non activées.", attrHr);
+        if (FAILED(attrHr = pA->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE)))
+            WarnMF(L"DXVA vidéo non disponible.", attrHr);
+        if (devMgr && FAILED(attrHr = pA->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, devMgr.Get())))
+            WarnMF(L"Gestionnaire D3D non attaché au lecteur vidéo.", attrHr);
+    }
 
     auto vid = std::make_unique<VideoSourceInfo>();
     if (FAILED(MFCreateSourceReaderFromURL(m_params->videoPath.c_str(), pA.Get(), &vid->reader))) {
@@ -309,8 +326,11 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
         return nullptr;
     }
 
-    vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+    if (FAILED(vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE)) ||
+        FAILED(vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE))) {
+        Fail(L"Impossible de sélectionner le flux vidéo source.");
+        return nullptr;
+    }
 
     // Prefer GPU-friendly formats: NV12 > P010 > YUY2
     {
@@ -332,15 +352,23 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
         }
     }
 
-    vid->reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &vid->actualType);
-    if (!vid->actualType) {
+    if (FAILED(vid->reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &vid->actualType)) ||
+        !vid->actualType) {
         Fail(L"Erreur lecture type vidéo.");
         return nullptr;
     }
 
-    MFGetAttributeSize(vid->actualType.Get(), MF_MT_FRAME_SIZE, &vid->width, &vid->height);
-    MFGetAttributeRatio(vid->actualType.Get(), MF_MT_FRAME_RATE, &vid->frNum, &vid->frDen);
-    if (vid->frNum == 0) { vid->frNum = 30; vid->frDen = 1; }
+    if (FAILED(MFGetAttributeSize(vid->actualType.Get(), MF_MT_FRAME_SIZE, &vid->width, &vid->height)) ||
+        vid->width == 0 || vid->height == 0) {
+        Fail(L"Dimensions vidéo source invalides.");
+        return nullptr;
+    }
+    if (FAILED(MFGetAttributeRatio(vid->actualType.Get(), MF_MT_FRAME_RATE, &vid->frNum, &vid->frDen)) ||
+        vid->frNum == 0 || vid->frDen == 0) {
+        WarnMF(L"Fréquence d'images inconnue ; 30 i/s utilisée.");
+        vid->frNum = 30;
+        vid->frDen = 1;
+    }
 
     // Compute scaled output dimensions, swapping the bounding box for portrait video
     UINT32 maxW = max_out_width, maxH = max_out_height;
@@ -370,8 +398,11 @@ std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader()
         return {};
     }
 
-    pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    pR->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
+    if (FAILED(pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE)) ||
+        FAILED(pR->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE))) {
+        Fail(L"Impossible de sélectionner le flux audio source.");
+        return {};
+    }
 
     ComPtr<IMFMediaType> pT;
     MFCreateMediaType(&pT);
@@ -422,16 +453,23 @@ ComPtr<IMFSinkWriter> VideoEncoder::CreateSinkWriter(
     const ComPtr<IMFDXGIDeviceManager>& devMgr)
 {
     ComPtr<IMFAttributes> pA;
-    MFCreateAttributes(&pA, 3);
-    pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-    pA->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
-    if (devMgr)
-        pA->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, devMgr.Get());
+    HRESULT attrHr = MFCreateAttributes(&pA, 3);
+    if (FAILED(attrHr)) {
+        WarnMF(L"Attributs du writer indisponibles ; configuration par défaut utilisée.", attrHr);
+    } else {
+        if (FAILED(attrHr = pA->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE)))
+            WarnMF(L"Transformations matérielles du writer non activées.", attrHr);
+        if (FAILED(attrHr = pA->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE)))
+            WarnMF(L"Throttling du writer non désactivé.", attrHr);
+        if (devMgr && FAILED(attrHr = pA->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, devMgr.Get())))
+            WarnMF(L"Gestionnaire D3D non attaché au writer.", attrHr);
+    }
 
     ComPtr<IMFSinkWriter> writer;
     if (FAILED(MFCreateSinkWriterFromURL(m_params->outputPath.c_str(), nullptr, pA.Get(), &writer)))
         return Fail(L"Impossible de créer le fichier de sortie."), nullptr;
 
+    m_outputCreated = true;
     return writer;
 }
 
@@ -577,6 +615,7 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
 
     while (loop.audWritten < target)
     {
+        if (IsCancellationRequested()) return Cancel();
         if (loop.audEOF)
         {
             // Write one chunk of silence and re-evaluate next iteration
@@ -691,13 +730,29 @@ void VideoEncoder::Fail(const wchar_t* msg)
     const wchar_t* raw = (msg && msg[0]) ? msg : L"Erreur inconnue lors de l'encodage.";
     std::wstring errmsg(raw);
 
-    if (m_params && !m_params->outputPath.empty()) {
+    // Never delete a pre-existing destination when setup failed before the
+    // sink writer actually created the new output file.
+    if (m_outputCreated && m_params && !m_params->outputPath.empty()) {
+        m_writer.Reset();
         DeleteFile(m_params->outputPath.c_str());
     }
 
-    if (m_params && m_params->hWnd) {
+    if (m_params && m_params->hWnd && IsWindow(m_params->hWnd)) {
         ENCODE_DONE_MSG doneMsg = { false, errmsg };
         SendMessage(m_params->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
+    }
+}
+
+bool VideoEncoder::IsCancellationRequested() const
+{
+    return m_params && m_params->cancelRequested && m_params->cancelRequested->load();
+}
+
+void VideoEncoder::Cancel()
+{
+    if (m_outputCreated && m_params && !m_params->outputPath.empty()) {
+        m_writer.Reset();
+        DeleteFile(m_params->outputPath.c_str());
     }
 }
 

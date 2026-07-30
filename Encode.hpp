@@ -1,5 +1,7 @@
 #pragma once
 #include <codecapi.h>
+#include <atomic>
+#include <memory>
 #include <string>
 #include <wtypes.h>
 #include "resource.h"
@@ -44,4 +46,5 @@ struct EncodeParams {
     int    qualityIdx;
     float  volumeScale;
     HWND   hWnd;
+    std::shared_ptr<std::atomic_bool> cancelRequested;
 };

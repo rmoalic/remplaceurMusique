@@ -120,6 +120,8 @@ private:
 
     // ── Error helper ─────────────────────────────────────────────────────────
     void Fail(const wchar_t* msg);
+    bool IsCancellationRequested() const;
+    void Cancel();
 
     // ── Members (only what spans the full object lifetime) ───────────────────
     std::unique_ptr<EncodeParams> m_params;
@@ -141,4 +143,5 @@ private:
     std::unique_ptr<VideoSourceInfo> m_vid;
     std::unique_ptr<AudioSourceInfo> m_aud;
     bool m_failed = false;
+    bool m_outputCreated = false;
 };
