@@ -163,6 +163,7 @@ bool VideoEncoder::Initialize()
         printf("Impossible de créer le gestionnaire de périphériques D3D11.");
 	}
     m_vid = OpenVideoReader(m_devMgr, preset.maxWidth, preset.maxHeight);
+	m_aud = OpenAudioReader();
     m_writer = CreateSinkWriter(m_devMgr);
     if (!m_writer) return false;
 	
@@ -170,7 +171,7 @@ bool VideoEncoder::Initialize()
     if (!vidIdx) return false;
     m_vidIdx = vidIdx;
 
-    auto audIdx = ConfigureAudioStream(m_writer.Get(), preset.audChannels, preset.audBytesPerSec);
+    auto audIdx = ConfigureAudioStream(*m_aud.get(), m_writer.Get(), preset.audChannels, preset.audBytesPerSec);
     if (!audIdx) return false;
     m_audIdx = audIdx;
     IMFSourceReader* reader = m_vid->reader.Get();
@@ -184,7 +185,8 @@ void VideoEncoder::Run()
         return Fail(L"Erreur démarrage écriture MP4.");
 
     EncodeLoop loop;
-    loop.audReader = OpenAudioReaderForJob();   // re-open (Initialize already validated it)
+    // Utiliser le lecteur audio préparé dans Initialize() si disponible
+    loop.audReader = (m_aud && m_aud->reader) ? m_aud->reader : nullptr;
     QueryPerformanceFrequency(&loop.qpcFreq);
     QueryPerformanceCounter(&loop.qpcStart);
 
@@ -200,6 +202,7 @@ void VideoEncoder::Run()
     ENCODE_DONE_MSG doneMsg = { true, L""};
     SendMessage(m_params->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Step 0 — D3D11 device + DXGI device manager (non-fatal)
@@ -307,8 +310,9 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
 // Step 2 — Audio source reader
 // ─────────────────────────────────────────────────────────────────────────────
 
-ComPtr<IMFSourceReader> VideoEncoder::OpenAudioReaderForJob()
+std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader()
 {
+
     ComPtr<IMFSourceReader> pR;
     if (FAILED(MFCreateSourceReaderFromURL(m_params->audioPath.c_str(), nullptr, &pR))) return {};
 
@@ -336,8 +340,14 @@ ComPtr<IMFSourceReader> VideoEncoder::OpenAudioReaderForJob()
         Fail(L"Impossible de d\u00e9coder l'audio.");
         return nullptr;
     }
-    return pR;
+    auto aud = std::make_unique<AudioSourceInfo>();
 
+	aud->reader = pR;
+	aud->actualType = pT;
+	aud->nbChannels = 2;
+	aud->bytesPerSec = 44100 * 2 * 2;
+
+    return aud;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,7 +414,7 @@ DWORD VideoEncoder::ConfigureVideoStream(
 // Step 5 — AAC audio output stream
 // ─────────────────────────────────────────────────────────────────────────────
 
-DWORD VideoEncoder::ConfigureAudioStream(IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec)
+DWORD VideoEncoder::ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec)
 {
     // Output: AAC-LC
     ComPtr<IMFMediaType> pOut;
@@ -548,8 +558,14 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
             loop.audEOF = true;
             if (m_params->audioShortMode == ASM_LOOP)
             {
-                loop.audReader = OpenAudioReaderForJob();
-                if (loop.audReader) { loop.audEOF = false; loop.audPosInRange = 0; }
+                // Ré-ouvrir la source audio en recréant m_aud (positionne à audioStart si nécessaire)
+                m_aud = OpenAudioReader();
+                if (m_aud && m_aud->reader)
+                {
+                    loop.audReader = m_aud->reader;
+                    loop.audEOF = false;
+                    loop.audPosInRange = 0;
+                }
             }
         }
     }

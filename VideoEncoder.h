@@ -22,6 +22,14 @@ struct VideoSourceInfo
     UINT32 outW = 0, outH = 0;     // scaled + H.264-aligned output dimensions
 };
 
+struct AudioSourceInfo
+{
+    ComPtr<IMFSourceReader> reader;
+    ComPtr<IMFMediaType>    actualType;
+    UINT32 nbChannels = 0;
+    UINT32 bytesPerSec = 0;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EncodeLoop  — mutable state that only lives inside VideoEncoder::Run()
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,7 +88,7 @@ private:
         const ComPtr<IMFDXGIDeviceManager>& devMgr, UINT32 max_out_width, UINT32 max_out_height);
 
     // Step 2 – audio source reader (delegates to ::OpenAudioReader)
-    ComPtr<IMFSourceReader> OpenAudioReaderForJob();
+    std::unique_ptr<AudioSourceInfo> OpenAudioReader();
 
     // Step 3 – sink writer for the output MP4
     ComPtr<IMFSinkWriter> CreateSinkWriter(
@@ -91,7 +99,7 @@ private:
         const VideoSourceInfo vid, IMFSinkWriter* writer, UINT32 max_vid_bitrate, UINT32 h264Profile);
     
     // Step 5 – add AAC stream, return assigned stream index
-    DWORD ConfigureAudioStream(IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec);
+    DWORD ConfigureAudioStream(const AudioSourceInfo aud,  IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec);
 
     // Step 6 – seek to videoStart (no-op when <= 0)
     void SeekVideoToStart(IMFSourceReader* reader);
@@ -128,4 +136,5 @@ private:
 
     // Kept for Run() to pass into ProcessVideoFrame
     std::unique_ptr<VideoSourceInfo> m_vid;
+    std::unique_ptr<AudioSourceInfo> m_aud;
 };
