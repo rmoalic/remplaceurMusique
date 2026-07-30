@@ -163,16 +163,20 @@ bool VideoEncoder::Initialize()
         printf("Impossible de créer le gestionnaire de périphériques D3D11.");
 	}
     m_vid = OpenVideoReader(m_devMgr, preset.maxWidth, preset.maxHeight);
+	if (!m_vid) return false;
+
 	m_aud = OpenAudioReader();
+	if (!m_aud) return false;
+
     m_writer = CreateSinkWriter(m_devMgr);
     if (!m_writer) return false;
 	
     auto vidIdx = ConfigureVideoStream(*m_vid.get(), m_writer.Get(), preset.maxVidBitrate, preset.h264Profile);
-    if (!vidIdx) return false;
+    if (vidIdx == kInvalidStreamIndex) return false;
     m_vidIdx = vidIdx;
 
     auto audIdx = ConfigureAudioStream(*m_aud.get(), m_writer.Get(), preset.audChannels, preset.audBytesPerSec);
-    if (!audIdx) return false;
+    if (audIdx == kInvalidStreamIndex) return false;
     m_audIdx = audIdx;
     IMFSourceReader* reader = m_vid->reader.Get();
     SeekVideoToStart(reader);
@@ -312,9 +316,13 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
 
 std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader()
 {
+    const QualityPreset preset = PRESETS[m_params->qualityIdx];
 
     ComPtr<IMFSourceReader> pR;
-    if (FAILED(MFCreateSourceReaderFromURL(m_params->audioPath.c_str(), nullptr, &pR))) return {};
+    if (FAILED(MFCreateSourceReaderFromURL(m_params->audioPath.c_str(), nullptr, &pR))) {
+        Fail(L"Impossible d'ouvrir le fichier audio.");
+        return {};
+    }
 
     pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
     pR->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
@@ -323,29 +331,39 @@ std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader()
     MFCreateMediaType(&pT);
     pT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     pT->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, preset.audChannels);
     pT->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
     pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    pT->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, preset.audChannels * 2);
+    pT->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                  44100 * preset.audChannels * 2);
     if (FAILED(pR->SetCurrentMediaType(
-        (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get())))
+        (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get()))) {
+        Fail(L"Impossible de décoder l'audio au format PCM demandé.");
         return {};
+    }
 
     if (m_params->audioStart > 0.0) {
         PROPVARIANT v;
         v.vt = VT_I8;
         v.hVal.QuadPart = (LONGLONG)(m_params->audioStart * 1e7);
-        pR->SetCurrentPosition(GUID_NULL, v);
+        if (FAILED(pR->SetCurrentPosition(GUID_NULL, v))) {
+            Fail(L"Impossible de positionner l'audio source.");
+            return {};
+        }
     }
-    if (!pR) {
-        Fail(L"Impossible de d\u00e9coder l'audio.");
+    ComPtr<IMFMediaType> actualType;
+    if (FAILED(pR->GetCurrentMediaType(
+        (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, &actualType))) {
+        Fail(L"Impossible de lire le format PCM audio.");
         return nullptr;
     }
     auto aud = std::make_unique<AudioSourceInfo>();
 
 	aud->reader = pR;
-	aud->actualType = pT;
-	aud->nbChannels = 2;
-	aud->bytesPerSec = 44100 * 2 * 2;
+	aud->actualType = actualType;
+	aud->nbChannels = preset.audChannels;
+	aud->bytesPerSec = 44100 * preset.audChannels * 2;
 
     return aud;
 }
@@ -399,12 +417,12 @@ DWORD VideoEncoder::ConfigureVideoStream(
     DWORD idx = 0;
     if (FAILED(writer->AddStream(pOut.Get(), &idx))) {
         Fail(L"Erreur ajout flux H264.");
-        return -1;
+        return kInvalidStreamIndex;
     }
 
     if (FAILED(writer->SetInputMediaType(idx, vid.actualType.Get(), nullptr))) {
         Fail(L"Type vidéo incompatible avec l'encodeur H264.");
-        return -1;
+        return kInvalidStreamIndex;
     }
 
     return idx;
@@ -430,21 +448,13 @@ DWORD VideoEncoder::ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWrite
     DWORD idx = 0;
     if (FAILED(writer->AddStream(pOut.Get(), &idx))) {
         Fail(L"Erreur ajout flux AAC.");
-        return -1;
+        return kInvalidStreamIndex;
     }
 
-    // Input: raw PCM (what OpenAudioReader produces)
-    ComPtr<IMFMediaType> pIn;
-    MFCreateMediaType(&pIn);
-    pIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-    pIn->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pIn->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    pIn->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    pIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-
-    if (FAILED(writer->SetInputMediaType(idx, pIn.Get(), nullptr))) {
+    // Input: the exact PCM format negotiated with the source reader.
+    if (FAILED(writer->SetInputMediaType(idx, aud.actualType.Get(), nullptr))) {
         Fail(L"Erreur configuration AAC. (Windows 7+)");
-        return -1;
+        return kInvalidStreamIndex;
     }
 
     return idx;

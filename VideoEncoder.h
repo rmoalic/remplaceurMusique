@@ -30,6 +30,8 @@ struct AudioSourceInfo
     UINT32 bytesPerSec = 0;
 };
 
+constexpr DWORD kInvalidStreamIndex = static_cast<DWORD>(-1);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EncodeLoop  — mutable state that only lives inside VideoEncoder::Run()
 // ─────────────────────────────────────────────────────────────────────────────
