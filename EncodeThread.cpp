@@ -81,19 +81,6 @@ double MF_GetDuration(const std::wstring& path)
     return d;
 }
 
-UINT32 MF_GetVideoBitrate(const std::wstring& path)
-{
-    ComPtr<IMFSourceReader> r;
-    if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &r))) return 0;
-    ComPtr<IMFMediaType> pT;
-    UINT32 br = 0;
-    if (SUCCEEDED(r->GetNativeMediaType(
-                      (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &pT)))
-        pT->GetUINT32(MF_MT_AVG_BITRATE, &br);
-    return br;
-}
-
-
 static HRESULT WriteAudioSample(
     IMFSinkWriter* pW, DWORD audIdx,
     IMFSample* pSrc, LONGLONG ts, float vol, LONGLONG maxDurationHns,
@@ -193,8 +180,7 @@ VideoEncoder::VideoEncoder(std::unique_ptr<EncodeParams> params)
     m_maxDurHns = (m_params->videoEnd > m_params->videoStart && m_params->videoEnd > 0.0)
         ? (LONGLONG)((m_params->videoEnd - m_params->videoStart) * 1e7)
         : LLONG_MAX;
-
-    const LONGLONG sourceDurHns = (LONGLONG)(MF_GetDuration(m_params->videoPath) * 1e7);
+    UINT32 sourceDurHns = MF_GetDuration(m_params->videoPath);
     if (sourceDurHns > 0) {
         m_outputDurHns = max(0LL, sourceDurHns - (LONGLONG)(m_params->videoStart * 1e7));
     }
@@ -330,6 +316,14 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
         FAILED(vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE))) {
         Fail(L"Impossible de sélectionner le flux vidéo source.");
         return nullptr;
+    }
+
+    // This is metadata only: quality selection may use it, but its absence
+    // must not prevent encoding.
+    ComPtr<IMFMediaType> nativeVideoType;
+    if (SUCCEEDED(vid->reader->GetNativeMediaType(
+        (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nativeVideoType))) {
+        nativeVideoType->GetUINT32(MF_MT_AVG_BITRATE, &vid->sourceBitrate);
     }
 
     // Prefer GPU-friendly formats: NV12 > P010 > YUY2
@@ -480,7 +474,7 @@ ComPtr<IMFSinkWriter> VideoEncoder::CreateSinkWriter(
 DWORD VideoEncoder::ConfigureVideoStream(
     const VideoSourceInfo vid, IMFSinkWriter* writer, UINT32 max_vid_bitrate, UINT32 h264Profile)
 {
-    UINT32 srcBitrate = MF_GetVideoBitrate(m_params->videoPath);
+    UINT32 srcBitrate = vid.sourceBitrate;
     UINT32 vBitrate = (max_vid_bitrate == 0)
         ? ((srcBitrate > 0) ? srcBitrate : 4000000u)
         : ((srcBitrate > 0)
@@ -692,11 +686,17 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
             loop.audEOF = true;
             if (m_params->audioShortMode == ASM_LOOP)
             {
-                // Ré-ouvrir la source audio en recréant m_aud (positionne à audioStart si nécessaire)
-                m_aud = OpenAudioReader();
-                if (m_aud && m_aud->reader)
+                PROPVARIANT position;
+                PropVariantInit(&position);
+                position.vt = VT_I8;
+                position.hVal.QuadPart = (LONGLONG)(m_params->audioStart * 1e7);
+                if (FAILED(loop.audReader->SetCurrentPosition(GUID_NULL, position))) {
+                    PropVariantClear(&position);
+                    Fail(L"Impossible de relancer l'audio source.");
+                    return;
+                }
+                PropVariantClear(&position);
                 {
-                    loop.audReader = m_aud->reader;
                     loop.audEOF = false;
                     loop.audPosInRange = 0;
                 }

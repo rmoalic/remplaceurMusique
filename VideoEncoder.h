@@ -19,6 +19,7 @@ struct VideoSourceInfo
     ComPtr<IMFMediaType>    actualType;  // negotiated decode format (NV12/P010/YUY2)
     UINT32 width = 0, height = 0;
     UINT32 frNum = 30, frDen = 1;
+    UINT32 sourceBitrate = 0;
     UINT32 outW = 0, outH = 0;     // scaled + H.264-aligned output dimensions
 };
 
