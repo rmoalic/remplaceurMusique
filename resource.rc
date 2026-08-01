@@ -1,5 +1,5 @@
 ﻿#pragma code_page(65001)
-#include "resource.h"
+#include "resource.hpp"
 #include <windows.h>
 
 200 VERSIONINFO

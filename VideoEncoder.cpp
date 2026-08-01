@@ -1,5 +1,6 @@
 ﻿#include <memory>
 #include <algorithm>
+#include <optional>
 #include <atomic>
 
 #define WIN32_LEAN_AND_MEAN
@@ -18,7 +19,7 @@
 
 using namespace Microsoft::WRL;
 
-#include "EncodeThread.hpp"
+#include "VideoEncoder.hpp"
 #include "Encode.hpp"
 
 static void WarnMF(const wchar_t* message, HRESULT hr = S_OK)
@@ -179,8 +180,7 @@ static HRESULT WriteAudioSample(
 }
 
 
-#include "VideoEncoder.h"
-#include <optional>
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction

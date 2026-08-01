@@ -8,15 +8,12 @@
 #include <memory>
 #include <string>
 #include <atomic>
+#include "Encode.hpp"
 
 using Microsoft::WRL::ComPtr;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hns — a duration or absolute position expressed in 100ns units (the native
-// unit throughout Media Foundation). Only the GUI layer deals in seconds;
-// everything past the boundary is Hns. Use Hns::FromSeconds() at that boundary
-// and nowhere else.
-// ─────────────────────────────────────────────────────────────────────────────
+double MF_GetDuration(const std::wstring& path);
+
 struct Hns
 {
     LONGLONG value = 0;
@@ -52,17 +49,14 @@ struct Hns
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VideoSourceInfo  — produced by OpenVideoReader(), consumed by ConfigureVideoStream()
-// ─────────────────────────────────────────────────────────────────────────────
 struct VideoSourceInfo
 {
     ComPtr<IMFSourceReader> reader;
-    ComPtr<IMFMediaType>    actualType;  // negotiated decode format (NV12/P010/YUY2)
+    ComPtr<IMFMediaType>    actualType;
     UINT32 width = 0, height = 0;
     UINT32 frNum = 30, frDen = 1;
     UINT32 sourceBitrate = 0;
-    UINT32 outW = 0, outH = 0;     // scaled + H.264-aligned output dimensions
+    UINT32 outW = 0, outH = 0;
 };
 
 struct AudioSourceInfo
@@ -75,33 +69,24 @@ struct AudioSourceInfo
 
 constexpr DWORD kInvalidStreamIndex = static_cast<DWORD>(-1);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-stream configuration. These exist so that call sites are self-
-// documenting: passing a VideoStreamConfig where an AudioStreamConfig is
-// expected is a compile error, unlike passing a bare LONGLONG in the wrong
-// argument slot (which is exactly how the audio/video start mix-up happened).
-// ─────────────────────────────────────────────────────────────────────────────
 struct VideoStreamConfig
 {
     UINT32 maxBitrate = 0;
     UINT32 h264Profile = 0;
     UINT32 maxWidth = 0;
     UINT32 maxHeight = 0;
-    Hns    startHns = Hns(0);     // seek point for the VIDEO reader
-    Hns    maxDurHns = Hns::Max(); // trim: stop once (ts - start) reaches this
+    Hns    startHns = Hns(0);
+    Hns    maxDurHns = Hns::Max();
 };
 
 struct AudioStreamConfig
 {
     UINT32 channels = 0;
     UINT32 bytesPerSec = 0;
-    Hns    startHns = Hns(0);      // seek point AND loop-restart point for the AUDIO reader
-    Hns    rangeHns = Hns::Max();  // trim: length of the selected audio range
+    Hns    startHns = Hns(0);
+    Hns    rangeHns = Hns::Max();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EncodeLoop  — mutable state that only lives inside VideoEncoder::Run()
-// ─────────────────────────────────────────────────────────────────────────────
 struct EncodeLoop
 {
     // Video pump
@@ -116,7 +101,6 @@ struct EncodeLoop
     LONGLONG audPosInRange = 0;
     bool     audEOF = false;
 
-    // Progress / ETA
     LONGLONG     lastProgressHns = 0;
     LARGE_INTEGER qpcFreq{};
     LARGE_INTEGER qpcStart{};
@@ -124,18 +108,6 @@ struct EncodeLoop
 
 enum class FrameResult { Continue, Done, Error };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VideoEncoder
-//
-// Construction can fail (bad files, unsupported formats, ...), so there is no
-// public constructor: use Create(), which returns nullptr on failure and has
-// already reported the error to the window. Any VideoEncoder you hold is
-// therefore guaranteed fully configured and safe to Run().
-//
-//   auto encoder = VideoEncoder::Create(std::move(params), cancelFlag);
-//   if (!encoder) return;   // failure was already reported
-//   encoder->Run();
-// ─────────────────────────────────────────────────────────────────────────────
 class VideoEncoder
 {
 public:
@@ -146,7 +118,6 @@ public:
     void Run();
 
 private:
-    // Only Create() may build one of these; every instance is fully valid.
     VideoEncoder(
         HWND hWnd, std::wstring outputPath, float volumeScale, AudioShortMode audioRepeat,
         std::shared_ptr<std::atomic_bool> cancelRequested,
@@ -155,8 +126,6 @@ private:
         DWORD vidIdx, DWORD audIdx,
         VideoStreamConfig vcfg, AudioStreamConfig acfg, Hns outputDurHns);
 
-    // ── Init helpers – static: they only get what they need, and report
-    //    failure through the `err` out-param instead of a hidden side channel.
     static ComPtr<IMFDXGIDeviceManager> CreateD3DManager();
 
     static std::unique_ptr<VideoSourceInfo> OpenVideoReader(

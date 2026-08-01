@@ -68,14 +68,13 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="EncodeThread.cpp" />
+    <ClCompile Include="VideoEncoder.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Encode.hpp" />
-    <ClInclude Include="EncodeThread.hpp" />
-    <ClInclude Include="resource.h" />
-    <ClInclude Include="VideoEncoder.h" />
+    <ClInclude Include="resource.hpp" />
+    <ClInclude Include="VideoEncoder.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />

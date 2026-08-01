@@ -28,8 +28,7 @@
 #include <shlwapi.h>
 #include <codecapi.h>
 #include <wrl/client.h>   // ComPtr
-#include "resource.h"
-#include "EncodeThread.hpp"
+#include "resource.hpp"
 #include "Encode.hpp"
 
 #include <string>
@@ -42,7 +41,7 @@
 #include <memory>
 #include <cstring>
 #include <iterator>
-#include "VideoEncoder.h"
+#include "VideoEncoder.hpp"
 
 using Microsoft::WRL::ComPtr;
 

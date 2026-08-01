@@ -4,7 +4,7 @@
 #include <memory>
 #include <string>
 #include <wtypes.h>
-#include "resource.h"
+#include "resource.hpp"
 
 #define WM_ENCODE_DONE      (WM_USER+1) // wParam = struct ENCODE_DONE_MSG
 #define WM_WAVEFORM_READY   (WM_USER+2)
