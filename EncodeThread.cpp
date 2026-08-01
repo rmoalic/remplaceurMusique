@@ -31,6 +31,17 @@ static void WarnMF(const wchar_t* message, HRESULT hr = S_OK)
     OutputDebugStringW(buffer);
 }
 
+// Single place that turns an init-time failure into a UI notification.
+// Nothing else in the init path touches HWND/SendMessage.
+static void SendFailure(HWND hWnd, const std::wstring& err)
+{
+    if (hWnd && IsWindow(hWnd)) {
+        std::wstring msg = err.empty() ? L"Erreur inconnue lors de l'encodage." : err;
+        ENCODE_DONE_MSG doneMsg = { false, msg };
+        SendMessage(hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
+    }
+}
+
 static bool WriteSilenceChunk(
     IMFSinkWriter* pW, DWORD audIdx,
     LONGLONG ts, LONGLONG durationHns,
@@ -175,99 +186,150 @@ static HRESULT WriteAudioSample(
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-VideoEncoder::VideoEncoder(std::unique_ptr<EncodeParams> params, std::shared_ptr<std::atomic_bool> cancelRequested)
+VideoEncoder::VideoEncoder(
+    HWND hWnd, std::wstring outputPath, float volumeScale, AudioShortMode audioRepeat,
+    std::shared_ptr<std::atomic_bool> cancelRequested,
+    ComPtr<IMFDXGIDeviceManager> devMgr, ComPtr<IMFSinkWriter> writer,
+    std::unique_ptr<VideoSourceInfo> vid, std::unique_ptr<AudioSourceInfo> aud,
+    DWORD vidIdx, DWORD audIdx,
+    VideoStreamConfig vcfg, AudioStreamConfig acfg, Hns outputDurHns)
+    : m_hWnd(hWnd)
+    , m_outputPath(std::move(outputPath))
+    , m_volumescale(volumeScale)
+    , m_audio_repeat(audioRepeat)
+    , m_cancelRequested(std::move(cancelRequested))
+    , m_devMgr(std::move(devMgr))
+    , m_writer(std::move(writer))
+    , m_vid(std::move(vid))
+    , m_aud(std::move(aud))
+    , m_vidIdx(vidIdx)
+    , m_audIdx(audIdx)
+    , m_vcfg(vcfg)
+    , m_acfg(acfg)
+    , m_outputDurHns(outputDurHns)
+    , m_pcmBytesNum((LONGLONG)(44100 * acfg.channels * 2))
 {
-    m_cancelRequested = cancelRequested;
-    m_hWnd = params->hWnd;
-    m_outputPath = params->outputPath;
-    m_volumescale = params->volumeScale;
-    m_audio_repeat = params->audioShortMode;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Factory — the only way to obtain a VideoEncoder. Every step below reports
+// its failure through `err`; SendFailure() is the single point that turns
+// that into a UI notification.
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::unique_ptr<VideoEncoder> VideoEncoder::Create(
+    std::unique_ptr<EncodeParams> params,
+    std::shared_ptr<std::atomic_bool> cancelRequested)
+{
+    const HWND hWnd = params->hWnd;
+    std::wstring err;
 
     const QualityPreset preset = PRESETS[params->qualityIdx];
-    m_pcmBytesNum = (LONGLONG)(44100 * preset.audChannels * 2);
 
-    // videoStart/videoEnd drive the VIDEO reader's seek + trim point.
-    m_videoStartHns = (LONGLONG)(params->videoStart * 1e7);
-    m_maxDurHns = (params->videoEnd > params->videoStart && params->videoEnd > 0.0)
-                  ? (LONGLONG)((params->videoEnd - params->videoStart) * 1e7)
-                  : LLONG_MAX;
+    VideoStreamConfig vcfg;
+    vcfg.maxBitrate = preset.maxVidBitrate;
+    vcfg.h264Profile = preset.h264Profile;
+    vcfg.maxWidth = preset.maxWidth;
+    vcfg.maxHeight = preset.maxHeight;
+    vcfg.startHns = Hns::FromSeconds(params->videoStart);
+    vcfg.maxDurHns = (params->videoEnd > params->videoStart && params->videoEnd > 0.0)
+                     ? Hns::FromSeconds(params->videoEnd - params->videoStart)
+                     : Hns::Max();
 
-    // audioStart/audioEnd drive the AUDIO reader's seek + trim + loop-restart point.
-    m_audioStartHns = (LONGLONG)(params->audioStart * 1e7);
-    m_audioEndHns = (params->audioEnd > params->audioStart
-                     && params->audioEnd > 0)
-                    ? (LONGLONG)(params->audioEnd * 1e7) : 0;
-    m_audioRangeHns = (m_audioEndHns > 0) ? (m_audioEndHns - m_audioStartHns) : LLONG_MAX;
+    AudioStreamConfig acfg;
+    acfg.channels = preset.audChannels;
+    acfg.bytesPerSec = preset.audBytesPerSec;
+    acfg.startHns = Hns::FromSeconds(params->audioStart);
+    const Hns audioEndHns = (params->audioEnd > params->audioStart && params->audioEnd > 0)
+                            ? Hns::FromSeconds(params->audioEnd) : Hns(0);
+    acfg.rangeHns = (audioEndHns.value > 0) ? (audioEndHns - acfg.startHns) : Hns::Max();
 
+    Hns outputDurHns = Hns::Max();
     const double sourceDurSec = MF_GetDuration(params->videoPath);
     if (sourceDurSec > 0.0) {
-        const LONGLONG sourceDurHns = (LONGLONG)(sourceDurSec * 1e7);
-        m_outputDurHns = max(0LL, sourceDurHns - m_videoStartHns);
+        const Hns sourceDurHns = Hns::FromSeconds(sourceDurSec);
+        outputDurHns = Hns(max(0LL, sourceDurHns.value - vcfg.startHns.value));
     }
-    if (m_maxDurHns != LLONG_MAX)
-        m_outputDurHns = min(m_outputDurHns, m_maxDurHns);
+    if (vcfg.maxDurHns.value != LLONG_MAX)
+        outputDurHns = Hns(min(outputDurHns.value, vcfg.maxDurHns.value));
 
-    m_initialized = Initialize(preset, params->videoPath, params->audioPath, params->outputPath);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────────────────────
-
-bool VideoEncoder::Initialize(QualityPreset preset, std::wstring vfile, std::wstring afile, std::wstring outfile)
-{
-    m_devMgr = CreateD3DManager();
-    if (m_devMgr == nullptr)
+    ComPtr<IMFDXGIDeviceManager> devMgr = CreateD3DManager();
+    if (!devMgr)
         WarnMF(L"Accélération matérielle indisponible ; utilisation du mode logiciel.");
 
-    m_vid = OpenVideoReader(m_devMgr, vfile, preset.maxWidth, preset.maxHeight);
-    if (!m_vid) return false;
+    auto vid = OpenVideoReader(devMgr, params->videoPath, vcfg, err);
+    if (!vid) {
+        SendFailure(hWnd, err);
+        return nullptr;
+    }
 
-    m_aud = OpenAudioReader(afile, m_audioStartHns, preset.audChannels);
-    if (!m_aud) return false;
+    auto aud = OpenAudioReader(params->audioPath, acfg, err);
+    if (!aud) {
+        SendFailure(hWnd, err);
+        return nullptr;
+    }
 
-    m_writer = CreateSinkWriter(m_devMgr, outfile);
-    if (!m_writer) return false;
+    ComPtr<IMFSinkWriter> writer = CreateSinkWriter(devMgr, params->outputPath, err);
+    if (!writer) {
+        SendFailure(hWnd, err);
+        return nullptr;
+    }
 
-    auto vidIdx = ConfigureVideoStream(*m_vid.get(), m_writer.Get(), preset.maxVidBitrate, preset.h264Profile);
-    if (vidIdx == kInvalidStreamIndex) return false;
-    m_vidIdx = vidIdx;
+    DWORD vidIdx = ConfigureVideoStream(*vid, writer.Get(), vcfg, err);
+    if (vidIdx == kInvalidStreamIndex) {
+        SendFailure(hWnd, err);
+        return nullptr;
+    }
 
-    auto audIdx = ConfigureAudioStream(*m_aud.get(), m_writer.Get(), preset.audChannels, preset.audBytesPerSec);
-    if (audIdx == kInvalidStreamIndex) return false;
-    m_audIdx = audIdx;
+    DWORD audIdx = ConfigureAudioStream(*aud, writer.Get(), acfg, err);
+    if (audIdx == kInvalidStreamIndex) {
+        SendFailure(hWnd, err);
+        return nullptr;
+    }
 
-    IMFSourceReader* reader = m_vid->reader.Get();
-    SeekVideoToStart(reader, m_videoStartHns);
-    if (m_failed) return false;
-    return true;
+    if (!SeekVideoToStart(vid->reader.Get(), vcfg.startHns, err)) {
+        SendFailure(hWnd, err);
+        return nullptr;
+    }
+
+    // std::unique_ptr<VideoEncoder>(new ...) since the constructor is private
+    // and this is the one place allowed to call it.
+    return std::unique_ptr<VideoEncoder>(new VideoEncoder(
+            hWnd, params->outputPath, params->volumeScale, params->audioShortMode,
+            std::move(cancelRequested), std::move(devMgr), std::move(writer),
+            std::move(vid), std::move(aud), vidIdx, audIdx, vcfg, acfg, outputDurHns));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Run — the only place, post-construction, that reports failure to the UI.
+// ─────────────────────────────────────────────────────────────────────────────
 
 void VideoEncoder::Run()
 {
-    if (!m_initialized) return;
     if (IsCancellationRequested()) return Cancel();
     if (FAILED(m_writer->BeginWriting()))
-        return Fail(L"Erreur démarrage écriture MP4.");
+        return ReportFailure(L"Erreur démarrage écriture MP4.");
 
     EncodeLoop loop;
-    // Utiliser le lecteur audio préparé dans Initialize() si disponible
     loop.audReader = (m_aud && m_aud->reader) ? m_aud->reader : nullptr;
     QueryPerformanceFrequency(&loop.qpcFreq);
     QueryPerformanceCounter(&loop.qpcStart);
 
+    std::wstring err;
     while (!loop.vidDone)
     {
         if (IsCancellationRequested()) return Cancel();
-        ProcessVideoFrame(loop, m_writer.Get(), m_vidIdx);
-        if (m_failed) return;
-        ProcessAudio(loop, m_writer.Get(), m_audIdx, m_audioRangeHns, m_outputDurHns);
-        if (m_failed) return;
+
+        const FrameResult fr = ProcessVideoFrame(loop, m_writer.Get(), m_vidIdx, err);
+        if (fr == FrameResult::Error) return ReportFailure(err);
+
+        if (!ProcessAudio(loop, m_writer.Get(), m_audIdx, err))
+            return ReportFailure(err);
     }
 
     PostMessage(m_hWnd, WM_ENCODE_PROGRESS, 100, 0);
     if (FAILED(m_writer->Finalize()))
-        return Fail(L"Impossible de finaliser le fichier MP4.");
+        return ReportFailure(L"Impossible de finaliser le fichier MP4.");
 
     ENCODE_DONE_MSG doneMsg = { true, L"" };
     SendMessage(m_hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
@@ -314,7 +376,8 @@ static UINT32 ComputeOutputDimension(UINT32 src, UINT32 max)
 }
 
 std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
-    const ComPtr<IMFDXGIDeviceManager>& devMgr, std::wstring vfile, UINT32 max_out_width, UINT32 max_out_height)
+    const ComPtr<IMFDXGIDeviceManager>& devMgr, const std::wstring& vfile,
+    const VideoStreamConfig& cfg, std::wstring& err)
 {
     ComPtr<IMFAttributes> pA;
     HRESULT attrHr = MFCreateAttributes(&pA, 3);
@@ -332,13 +395,13 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
 
     auto vid = std::make_unique<VideoSourceInfo>();
     if (FAILED(MFCreateSourceReaderFromURL(vfile.c_str(), pA.Get(), &vid->reader))) {
-        Fail(L"Impossible d'ouvrir la vidéo source.");
+        err = L"Impossible d'ouvrir la vidéo source.";
         return nullptr;
     }
 
     if (FAILED(vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE)) ||
             FAILED(vid->reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE))) {
-        Fail(L"Impossible de sélectionner le flux vidéo source.");
+        err = L"Impossible de sélectionner le flux vidéo source.";
         return nullptr;
     }
 
@@ -365,20 +428,20 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
             if (SUCCEEDED(hr)) break;
         }
         if (FAILED(hr)) {
-            Fail(L"Impossible de décoder la vidéo.");
+            err = L"Impossible de décoder la vidéo.";
             return nullptr;
         }
     }
 
     if (FAILED(vid->reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &vid->actualType)) ||
             !vid->actualType) {
-        Fail(L"Erreur lecture type vidéo.");
+        err = L"Erreur lecture type vidéo.";
         return nullptr;
     }
 
     if (FAILED(MFGetAttributeSize(vid->actualType.Get(), MF_MT_FRAME_SIZE, &vid->width, &vid->height)) ||
             vid->width == 0 || vid->height == 0) {
-        Fail(L"Dimensions vidéo source invalides.");
+        err = L"Dimensions vidéo source invalides.";
         return nullptr;
     }
     if (FAILED(MFGetAttributeRatio(vid->actualType.Get(), MF_MT_FRAME_RATE, &vid->frNum, &vid->frDen)) ||
@@ -389,7 +452,7 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
     }
 
     // Compute scaled output dimensions, swapping the bounding box for portrait video
-    UINT32 maxW = max_out_width, maxH = max_out_height;
+    UINT32 maxW = cfg.maxWidth, maxH = cfg.maxHeight;
     if (vid->height > vid->width && maxW > 0 && maxH > 0) std::swap(maxW, maxH);
 
     float scaleW = (maxW > 0 && vid->width > maxW) ? (float)maxW / vid->width : 1.0f;
@@ -406,17 +469,18 @@ std::unique_ptr<VideoSourceInfo> VideoEncoder::OpenVideoReader(
 // Step 2 — Audio source reader
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader(std::wstring afile, LONGLONG audioStartHns, int nb_channels)
+std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader(
+    const std::wstring& afile, const AudioStreamConfig& cfg, std::wstring& err)
 {
     ComPtr<IMFSourceReader> pR;
     if (FAILED(MFCreateSourceReaderFromURL(afile.c_str(), nullptr, &pR))) {
-        Fail(L"Impossible d'ouvrir le fichier audio.");
+        err = L"Impossible d'ouvrir le fichier audio.";
         return {};
     }
 
     if (FAILED(pR->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE)) ||
             FAILED(pR->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE))) {
-        Fail(L"Impossible de sélectionner le flux audio source.");
+        err = L"Impossible de sélectionner le flux audio source.";
         return {};
     }
 
@@ -424,23 +488,23 @@ std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader(std::wstring afil
     MFCreateMediaType(&pT);
     pT->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     pT->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, nb_channels);
+    pT->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, cfg.channels);
     pT->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
     pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    pT->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, nb_channels * 2);
-    pT->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 44100 * nb_channels * 2);
+    pT->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, cfg.channels * 2);
+    pT->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 44100 * cfg.channels * 2);
     if (FAILED(pR->SetCurrentMediaType(
                    (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get()))) {
-        Fail(L"Impossible de décoder l'audio au format PCM demandé.");
+        err = L"Impossible de décoder l'audio au format PCM demandé.";
         return {};
     }
 
-    if (audioStartHns > 0) {
+    if (cfg.startHns.value > 0) {
         PROPVARIANT v;
         v.vt = VT_I8;
-        v.hVal.QuadPart = audioStartHns;
+        v.hVal.QuadPart = cfg.startHns.value;
         if (FAILED(pR->SetCurrentPosition(GUID_NULL, v))) {
-            Fail(L"Impossible de positionner l'audio source.");
+            err = L"Impossible de positionner l'audio source.";
             return {};
         }
     }
@@ -448,15 +512,15 @@ std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader(std::wstring afil
     ComPtr<IMFMediaType> actualType;
     if (FAILED(pR->GetCurrentMediaType(
                    (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, &actualType))) {
-        Fail(L"Impossible de lire le format PCM audio.");
+        err = L"Impossible de lire le format PCM audio.";
         return nullptr;
     }
 
     auto aud = std::make_unique<AudioSourceInfo>();
     aud->reader = pR;
     aud->actualType = actualType;
-    aud->nbChannels = nb_channels;
-    aud->bytesPerSec = 44100 * nb_channels * 2;
+    aud->nbChannels = cfg.channels;
+    aud->bytesPerSec = 44100 * cfg.channels * 2;
 
     return aud;
 }
@@ -466,7 +530,7 @@ std::unique_ptr<AudioSourceInfo> VideoEncoder::OpenAudioReader(std::wstring afil
 // ─────────────────────────────────────────────────────────────────────────────
 
 ComPtr<IMFSinkWriter> VideoEncoder::CreateSinkWriter(
-    const ComPtr<IMFDXGIDeviceManager>& devMgr, std::wstring outfile)
+    const ComPtr<IMFDXGIDeviceManager>& devMgr, const std::wstring& outfile, std::wstring& err)
 {
     ComPtr<IMFAttributes> pA;
     HRESULT attrHr = MFCreateAttributes(&pA, 3);
@@ -483,10 +547,11 @@ ComPtr<IMFSinkWriter> VideoEncoder::CreateSinkWriter(
     }
 
     ComPtr<IMFSinkWriter> writer;
-    if (FAILED(MFCreateSinkWriterFromURL(outfile.c_str(), nullptr, pA.Get(), &writer)))
-        return Fail(L"Impossible de créer le fichier de sortie."), nullptr;
+    if (FAILED(MFCreateSinkWriterFromURL(outfile.c_str(), nullptr, pA.Get(), &writer))) {
+        err = L"Impossible de créer le fichier de sortie.";
+        return nullptr;
+    }
 
-    m_outputCreated = true;
     return writer;
 }
 
@@ -495,14 +560,14 @@ ComPtr<IMFSinkWriter> VideoEncoder::CreateSinkWriter(
 // ─────────────────────────────────────────────────────────────────────────────
 
 DWORD VideoEncoder::ConfigureVideoStream(
-    const VideoSourceInfo vid, IMFSinkWriter* writer, UINT32 max_vid_bitrate, UINT32 h264Profile)
+    const VideoSourceInfo& vid, IMFSinkWriter* writer, const VideoStreamConfig& cfg, std::wstring& err)
 {
     UINT32 srcBitrate = vid.sourceBitrate;
-    UINT32 vBitrate = (max_vid_bitrate == 0)
+    UINT32 vBitrate = (cfg.maxBitrate == 0)
                       ? ((srcBitrate > 0) ? srcBitrate : 4000000u)
                       : ((srcBitrate > 0)
-                         ? min(max_vid_bitrate, srcBitrate)
-                         : max_vid_bitrate);
+                         ? min(cfg.maxBitrate, srcBitrate)
+                         : cfg.maxBitrate);
 
     ComPtr<IMFMediaType> pOut;
     MFCreateMediaType(&pOut);
@@ -513,16 +578,16 @@ DWORD VideoEncoder::ConfigureVideoStream(
     MFSetAttributeRatio(pOut.Get(), MF_MT_FRAME_RATE, vid.frNum, vid.frDen);
     MFSetAttributeRatio(pOut.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     pOut->SetUINT32(MF_MT_AVG_BITRATE, vBitrate);
-    pOut->SetUINT32(MF_MT_MPEG2_PROFILE, h264Profile);
+    pOut->SetUINT32(MF_MT_MPEG2_PROFILE, cfg.h264Profile);
 
     DWORD idx = 0;
     if (FAILED(writer->AddStream(pOut.Get(), &idx))) {
-        Fail(L"Erreur ajout flux H264.");
+        err = L"Erreur ajout flux H264.";
         return kInvalidStreamIndex;
     }
 
     if (FAILED(writer->SetInputMediaType(idx, vid.actualType.Get(), nullptr))) {
-        Fail(L"Type vidéo incompatible avec l'encodeur H264.");
+        err = L"Type vidéo incompatible avec l'encodeur H264.";
         return kInvalidStreamIndex;
     }
 
@@ -533,7 +598,8 @@ DWORD VideoEncoder::ConfigureVideoStream(
 // Step 5 — AAC audio output stream
 // ─────────────────────────────────────────────────────────────────────────────
 
-DWORD VideoEncoder::ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec)
+DWORD VideoEncoder::ConfigureAudioStream(
+    const AudioSourceInfo& aud, IMFSinkWriter* writer, const AudioStreamConfig& cfg, std::wstring& err)
 {
     // Output: AAC-LC
     ComPtr<IMFMediaType> pOut;
@@ -542,19 +608,19 @@ DWORD VideoEncoder::ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWrite
     pOut->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
     pOut->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     pOut->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    pOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, nb_channels);
-    pOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytes_per_sec);
+    pOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, cfg.channels);
+    pOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, cfg.bytesPerSec);
     pOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29); // AAC-LC
 
     DWORD idx = 0;
     if (FAILED(writer->AddStream(pOut.Get(), &idx))) {
-        Fail(L"Erreur ajout flux AAC.");
+        err = L"Erreur ajout flux AAC.";
         return kInvalidStreamIndex;
     }
 
     // Input: the exact PCM format negotiated with the source reader.
     if (FAILED(writer->SetInputMediaType(idx, aud.actualType.Get(), nullptr))) {
-        Fail(L"Erreur configuration AAC. (Windows 7+)");
+        err = L"Erreur configuration AAC. (Windows 7+)";
         return kInvalidStreamIndex;
     }
 
@@ -565,22 +631,25 @@ DWORD VideoEncoder::ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWrite
 // Step 6 — Seek video to start
 // ─────────────────────────────────────────────────────────────────────────────
 
-void VideoEncoder::SeekVideoToStart(IMFSourceReader* reader, LONGLONG start)
+bool VideoEncoder::SeekVideoToStart(IMFSourceReader* reader, Hns start, std::wstring& err)
 {
-    if (start <= 0) return;
+    if (start.value <= 0) return true;
 
     PROPVARIANT v;
     v.vt = VT_I8;
-    v.hVal.QuadPart = start;
-    if (FAILED(reader->SetCurrentPosition(GUID_NULL, v)))
-        Fail(L"Impossible de positionner la vidéo source.");
+    v.hVal.QuadPart = start.value;
+    if (FAILED(reader->SetCurrentPosition(GUID_NULL, v))) {
+        err = L"Impossible de positionner la vidéo source.";
+        return false;
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Encode-loop helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DWORD vidIdx)
+FrameResult VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DWORD vidIdx, std::wstring& err)
 {
     ComPtr<IMFSample> pS;
     DWORD    flags = 0;
@@ -591,16 +660,18 @@ bool VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DW
                      0, nullptr, &flags, &ts, &pS);
 
     if (FAILED(hr)) {
-        Fail(L"Erreur pendant la lecture de la vidéo.");
-        return false;
+        err = L"Erreur pendant la lecture de la vidéo.";
+        return FrameResult::Error;
     }
-    if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
-        return loop.vidDone = true, false;
+    if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+        loop.vidDone = true;
+        return FrameResult::Done;
+    }
 
     if (!pS)
     {
         if (++loop.nullStreak > 200) loop.vidDone = true;
-        return false;
+        return loop.vidDone ? FrameResult::Done : FrameResult::Continue;
     }
 
     loop.nullStreak = 0;
@@ -608,31 +679,38 @@ bool VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DW
 
     const LONGLONG rel = ts - loop.vidTimeBase;
 
-    if (m_maxDurHns != LLONG_MAX && rel >= m_maxDurHns)
-        return loop.vidDone = true, false;
+    if (m_vcfg.maxDurHns.value != LLONG_MAX && rel >= m_vcfg.maxDurHns.value) {
+        loop.vidDone = true;
+        return FrameResult::Done;
+    }
 
     if (FAILED(pS->SetSampleTime(rel)) || FAILED(writer->WriteSample(vidIdx, pS.Get()))) {
-        Fail(L"Erreur pendant l'écriture de la vidéo.");
-        return false;
+        err = L"Erreur pendant l'écriture de la vidéo.";
+        return FrameResult::Error;
     }
     loop.vidLastTs = rel;
 
-    if (m_maxDurHns != LLONG_MAX && rel - loop.lastProgressHns > 5000000LL)
-        ReportProgress(loop, rel, m_maxDurHns);
+    if (m_vcfg.maxDurHns.value != LLONG_MAX && rel - loop.lastProgressHns > 5000000LL)
+        ReportProgress(loop, rel, m_vcfg.maxDurHns.value);
 
-    return true;
+    return FrameResult::Continue;
 }
 
-void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx,
-                                LONGLONG audioRangeHns, LONGLONG outputDurHns)
+bool VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx, std::wstring& err)
 {
+    const LONGLONG audioRangeHns = m_acfg.rangeHns.value;
+    const LONGLONG outputDurHns = m_outputDurHns.value;
+
     const LONGLONG target = min(
                                 loop.vidLastTs + 2000000LL,
                                 outputDurHns == LLONG_MAX ? loop.vidLastTs + 2000000LL : outputDurHns);
 
     while (loop.audWritten < target)
     {
-        if (IsCancellationRequested()) return Cancel();
+        if (IsCancellationRequested()) {
+            Cancel();
+            return true;
+        }
         if (loop.audEOF)
         {
             // Write one chunk of silence and re-evaluate next iteration
@@ -642,10 +720,10 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
             if (!WriteSilenceChunk(
                         writer, audIdx, loop.audWritten,
                         chunk, m_pcmBytesNum, kPcmHnsDen, &written)) {
-                Fail(L"Erreur pendant l'écriture du silence audio.");
-                return;
+                err = L"Erreur pendant l'écriture du silence audio.";
+                return false;
             }
-            if (written <= 0) return;
+            if (written <= 0) return true;
             loop.audWritten += written;
             continue;
         }
@@ -657,8 +735,8 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
                          0, nullptr, &flags, nullptr, &pS);
 
         if (FAILED(hr)) {
-            Fail(L"Erreur pendant la lecture de l'audio.");
-            return;
+            err = L"Erreur pendant la lecture de l'audio.";
+            return false;
         }
         const bool eof = flags & MF_SOURCE_READERF_ENDOFSTREAM;
 
@@ -685,8 +763,8 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
                     wchar_t msg[128] = {};
                     swprintf_s(msg, L"Erreur pendant l'écriture de l'audio (0x%08X).",
                                static_cast<UINT32>(writeHr));
-                    Fail(msg);
-                    return;
+                    err = msg;
+                    return false;
                 }
                 if (writeHr == S_FALSE) {
                     // Do not loop forever on the sub-frame remainder at the
@@ -694,7 +772,7 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
                     // mark EOF so the loop/silence policy takes over.
                     if (outputDurHns != LLONG_MAX && outputRemaining < dur) {
                         loop.audWritten = outputDurHns;
-                        return;
+                        return true;
                     }
                     loop.audEOF = true;
                 }
@@ -709,19 +787,19 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
         if (eof || loop.audEOF)
         {
             loop.audEOF = true;
-            if (this->m_audio_repeat == ASM_LOOP)
+            if (m_audio_repeat == ASM_LOOP)
             {
                 // Restart the audio reader at the beginning of the selected
-                // audio RANGE (audioStart), not at m_audioRangeHns, which is
-                // a duration, not a position.
+                // audio RANGE (audioStart), not at rangeHns, which is a
+                // duration, not a position.
                 PROPVARIANT position;
                 PropVariantInit(&position);
                 position.vt = VT_I8;
-                position.hVal.QuadPart = m_audioStartHns;
+                position.hVal.QuadPart = m_acfg.startHns.value;
                 if (FAILED(loop.audReader->SetCurrentPosition(GUID_NULL, position))) {
                     PropVariantClear(&position);
-                    Fail(L"Impossible de relancer l'audio source.");
-                    return;
+                    err = L"Impossible de relancer l'audio source.";
+                    return false;
                 }
                 PropVariantClear(&position);
                 loop.audEOF = false;
@@ -729,6 +807,7 @@ void VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
             }
         }
     }
+    return true;
 }
 
 void VideoEncoder::ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG maxDurHns)
@@ -749,18 +828,14 @@ void VideoEncoder::ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG ma
                 (WPARAM)pct, (LPARAM)(LONGLONG)eta);
 }
 
-void VideoEncoder::Fail(const wchar_t* msg)
+// ─────────────────────────────────────────────────────────────────────────────
+// Runtime error / cancellation — only used after construction has succeeded.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void VideoEncoder::ReportFailure(const std::wstring& msg)
 {
-    if (m_failed) return;
-    m_failed = true;
-    const wchar_t* raw = (msg && msg[0]) ? msg : L"Erreur inconnue lors de l'encodage.";
-    std::wstring errmsg(raw);
-
-    // Never delete a pre-existing destination when setup failed before the
-    // sink writer actually created the new output file. (kept disabled
-    // intentionally — see m_outputCreated.)
-
     if (m_hWnd && IsWindow(m_hWnd)) {
+        std::wstring errmsg = msg.empty() ? L"Erreur inconnue lors de l'encodage." : msg;
         ENCODE_DONE_MSG doneMsg = { false, errmsg };
         SendMessage(m_hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
     }
@@ -773,7 +848,7 @@ bool VideoEncoder::IsCancellationRequested() const
 
 void VideoEncoder::Cancel()
 {
-    if (m_outputCreated && !m_outputPath.empty()) {
+    if (!m_outputPath.empty()) {
         m_writer.Reset();
         DeleteFile(m_outputPath.c_str());
     }
@@ -790,6 +865,7 @@ void VideoEncoder::Cancel()
 
 static void EncodeThread(std::unique_ptr<EncodeParams> params, std::shared_ptr<std::atomic_bool> cancelRequested)
 {
-    VideoEncoder encoder(std::move(params), cancelRequested);
-    encoder.Run();
+    auto encoder = VideoEncoder::Create(std::move(params), cancelRequested);
+    if (!encoder) return; // failure already reported by Create()
+    encoder->Run();
 }

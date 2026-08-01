@@ -893,8 +893,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     SendMessage(ep->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
                     return;
                 }
-                VideoEncoder ve(std::move(ep), cancelRequested);
-                ve.Run();
+                auto ve = VideoEncoder::Create(std::move(ep), cancelRequested);
+                ve->Run();
                 CoUninitialize();
             });
         }
