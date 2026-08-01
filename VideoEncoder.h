@@ -7,6 +7,7 @@
 #include <climits>
 #include <memory>
 #include <string>
+#include <atomic>
 
 using Microsoft::WRL::ComPtr;
 
@@ -67,9 +68,8 @@ struct EncodeLoop
 //   - the configured sink writer + stream indices
 //
 // Typical use:
-//   VideoEncoder encoder(std::move(params));
-//   if (!encoder.Initialize()) return;
-//   encoder.Run();
+//   VideoEncoder encoder(std::move(params), cancelFlag);
+//   encoder.Run();   // no-ops safely if construction/Initialize() failed
 // ─────────────────────────────────────────────────────────────────────────────
 class VideoEncoder
 {
@@ -89,7 +89,8 @@ private:
     // Step 1 – video source reader + negotiated format metadata
     std::unique_ptr<VideoSourceInfo> OpenVideoReader(const ComPtr<IMFDXGIDeviceManager>& devMgr, std::wstring vfile, UINT32 max_out_width, UINT32 max_out_height);
 
-    std::unique_ptr<AudioSourceInfo> OpenAudioReader(std::wstring afile, LONGLONG audioStart, int nb_channels);
+    // Step 2 – audio source reader
+    std::unique_ptr<AudioSourceInfo> OpenAudioReader(std::wstring afile, LONGLONG audioStartHns, int nb_channels);
 
     // Step 3 – sink writer for the output MP4
     ComPtr<IMFSinkWriter> CreateSinkWriter(
@@ -98,11 +99,11 @@ private:
     // Step 4 – add H.264 stream, return assigned stream index
     DWORD ConfigureVideoStream(
         const VideoSourceInfo vid, IMFSinkWriter* writer, UINT32 max_vid_bitrate, UINT32 h264Profile);
-    
+
     // Step 5 – add AAC stream, return assigned stream index
     DWORD ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec);
 
-    // Step 6 – seek to videoStart (no-op when <= 0)
+    // Step 6 – seek reader to `start` (hns). No-op when start <= 0.
     void SeekVideoToStart(IMFSourceReader* reader, LONGLONG start);
 
     // ── Encode-loop helpers (all take explicit state, nothing implicit) ──────
@@ -112,22 +113,28 @@ private:
 
     // Write audio to stay ~200 ms ahead of video; handles looping + silence.
     void ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx,
-        LONGLONG audioRangeHns, LONGLONG outputDurHns);
+                      LONGLONG audioRangeHns, LONGLONG outputDurHns);
 
     // Progress notification (only called when maxDurHns is known)
     void ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG maxDurHns);
 
-    // ── Error helper ─────────────────────────────────────────────────────────
+    // ── Error / cancellation helpers ──────────────────────────────────────────
     void Fail(const wchar_t* msg);
     bool IsCancellationRequested() const;
     void Cancel();
 
     // ── Members (only what spans the full object lifetime) ───────────────────
-    //std::unique_ptr<EncodeParams> m_params;
-    HWND m_hWnd;
-	float m_volumescale = 1.0f;
-	LONGLONG m_audioStartHns = 0;
-	LONGLONG m_audioEndHns = 0;
+    HWND  m_hWnd = nullptr;
+    std::wstring m_outputPath;
+    float m_volumescale = 1.0f;
+
+    // videoStart/videoEnd — used to trim & seek the VIDEO reader
+    LONGLONG m_videoStartHns = 0;
+
+    // audioStart/audioEnd — used to trim, seek, and loop-restart the AUDIO reader
+    LONGLONG m_audioStartHns = 0;
+    LONGLONG m_audioEndHns = 0;
+
     AudioShortMode m_audio_repeat = ASM_LOOP;
     std::shared_ptr<std::atomic_bool> m_cancelRequested;
 
@@ -138,15 +145,17 @@ private:
     DWORD                         m_audIdx = 1;
 
     // Precomputed from params (read-only after ctor)
-    LONGLONG m_maxDurHns = LLONG_MAX;
-    LONGLONG m_outputDurHns = LLONG_MAX;
-    LONGLONG m_audioRangeHns = LLONG_MAX;
+    LONGLONG m_maxDurHns = LLONG_MAX;      // videoEnd - videoStart, or LLONG_MAX
+    LONGLONG m_outputDurHns = LLONG_MAX;   // min(source duration - videoStart, m_maxDurHns)
+    LONGLONG m_audioRangeHns = LLONG_MAX;  // audioEnd - audioStart, or LLONG_MAX
     LONGLONG m_pcmBytesNum = 0;
     static constexpr LONGLONG kPcmHnsDen = 10000000LL;
 
     // Kept for Run() to pass into ProcessVideoFrame
     std::unique_ptr<VideoSourceInfo> m_vid;
     std::unique_ptr<AudioSourceInfo> m_aud;
+
+    bool m_initialized = false;   // set by ctor; Run() no-ops if false
     bool m_failed = false;
     bool m_outputCreated = false;
 };
