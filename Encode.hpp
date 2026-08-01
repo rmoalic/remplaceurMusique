@@ -46,5 +46,4 @@ struct EncodeParams {
     int    qualityIdx;
     float  volumeScale;
     HWND   hWnd;
-    std::shared_ptr<std::atomic_bool> cancelRequested;
 };

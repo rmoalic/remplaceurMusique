@@ -882,19 +882,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto ep = std::make_unique<EncodeParams>(EncodeParams{
                 video, audio, out, vidStart, vidEnd,
                 audStart, audEnd, g_audioShortMode,
-                g_qualityIdx, g_volumePct / 100.0f, hWnd,
-                std::make_shared<std::atomic_bool>(false) });
+                g_qualityIdx, g_volumePct / 100.0f, hWnd
+               });
             if (g_encodeThread.joinable()) g_encodeThread.join();
-            g_encodeCancel = ep->cancelRequested;
-            g_encodeThread = std::thread([ep = std::move(ep)]() mutable {
+            g_encodeCancel = std::make_shared<std::atomic_bool>(false);
+            g_encodeThread = std::thread([ep = std::move(ep), cancelRequested = g_encodeCancel]() mutable {
                 const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
                 if (FAILED(coHr)) {
                     ENCODE_DONE_MSG doneMsg = { false, L"Impossible d'initialiser COM pour l'encodage." };
                     SendMessage(ep->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
                     return;
                 }
-                VideoEncoder ve(std::move(ep));
-                if (ve.Initialize()) ve.Run();
+                VideoEncoder ve(std::move(ep), cancelRequested);
+                ve.Run();
                 CoUninitialize();
             });
         }

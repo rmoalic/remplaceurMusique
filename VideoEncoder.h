@@ -74,12 +74,12 @@ struct EncodeLoop
 class VideoEncoder
 {
 public:
-    explicit VideoEncoder(std::unique_ptr<EncodeParams> params);
+    explicit VideoEncoder(std::unique_ptr<EncodeParams> params, std::shared_ptr<std::atomic_bool> cancelRequested);
 
-    bool Initialize();
     void Run();
 
 private:
+    bool Initialize(QualityPreset preset, std::wstring vfile, std::wstring afile, std::wstring outfile);
     // ── Init helpers – each returns its product, nullptr/false on failure ────
     //    Failures call Fail() internally before returning.
 
@@ -87,25 +87,23 @@ private:
     ComPtr<IMFDXGIDeviceManager> CreateD3DManager();
 
     // Step 1 – video source reader + negotiated format metadata
-    std::unique_ptr<VideoSourceInfo> OpenVideoReader(
-        const ComPtr<IMFDXGIDeviceManager>& devMgr, UINT32 max_out_width, UINT32 max_out_height);
+    std::unique_ptr<VideoSourceInfo> OpenVideoReader(const ComPtr<IMFDXGIDeviceManager>& devMgr, std::wstring vfile, UINT32 max_out_width, UINT32 max_out_height);
 
-    // Step 2 – audio source reader (delegates to ::OpenAudioReader)
-    std::unique_ptr<AudioSourceInfo> OpenAudioReader();
+    std::unique_ptr<AudioSourceInfo> OpenAudioReader(std::wstring afile, LONGLONG audioStart, int nb_channels);
 
     // Step 3 – sink writer for the output MP4
     ComPtr<IMFSinkWriter> CreateSinkWriter(
-        const ComPtr<IMFDXGIDeviceManager>& devMgr);
+        const ComPtr<IMFDXGIDeviceManager>& devMgr, std::wstring outfile);
 
     // Step 4 – add H.264 stream, return assigned stream index
     DWORD ConfigureVideoStream(
         const VideoSourceInfo vid, IMFSinkWriter* writer, UINT32 max_vid_bitrate, UINT32 h264Profile);
     
     // Step 5 – add AAC stream, return assigned stream index
-    DWORD ConfigureAudioStream(const AudioSourceInfo aud,  IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec);
+    DWORD ConfigureAudioStream(const AudioSourceInfo aud, IMFSinkWriter* writer, UINT32 nb_channels, UINT32 bytes_per_sec);
 
     // Step 6 – seek to videoStart (no-op when <= 0)
-    void SeekVideoToStart(IMFSourceReader* reader);
+    void SeekVideoToStart(IMFSourceReader* reader, LONGLONG start);
 
     // ── Encode-loop helpers (all take explicit state, nothing implicit) ──────
 
@@ -125,7 +123,13 @@ private:
     void Cancel();
 
     // ── Members (only what spans the full object lifetime) ───────────────────
-    std::unique_ptr<EncodeParams> m_params;
+    //std::unique_ptr<EncodeParams> m_params;
+    HWND m_hWnd;
+	float m_volumescale = 1.0f;
+	LONGLONG m_audioStartHns = 0;
+	LONGLONG m_audioEndHns = 0;
+    AudioShortMode m_audio_repeat = ASM_LOOP;
+    std::shared_ptr<std::atomic_bool> m_cancelRequested;
 
     // Produced by Initialize(), consumed by Run()
     ComPtr<IMFDXGIDeviceManager>  m_devMgr;
