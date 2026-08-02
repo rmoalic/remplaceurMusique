@@ -42,6 +42,7 @@
 #include <cstring>
 #include <iterator>
 #include "VideoEncoder.hpp"
+#include "EncodeJob.hpp"
 
 using Microsoft::WRL::ComPtr;
 
@@ -167,8 +168,7 @@ static UIState ui;
 std::atomic<bool> encoding{ false };
 static std::atomic<bool> g_appClosing{ false };
 static std::atomic_uint64_t g_waveformGeneration{ 0 };
-static std::thread g_encodeThread;
-static std::shared_ptr<std::atomic_bool> g_encodeCancel;
+static std::unique_ptr<EncodeJob> g_encodeJob;
 static std::vector<std::thread> g_waveformThreads;
 
 struct WaveformResult {
@@ -883,19 +883,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 audStart, audEnd, g_audioShortMode,
                 g_qualityIdx, g_volumePct / 100.0f, hWnd
                });
-            if (g_encodeThread.joinable()) g_encodeThread.join();
-            g_encodeCancel = std::make_shared<std::atomic_bool>(false);
-            g_encodeThread = std::thread([ep = std::move(ep), cancelRequested = g_encodeCancel]() mutable {
-                const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-                if (FAILED(coHr)) {
-                    ENCODE_DONE_MSG doneMsg = { false, L"Impossible d'initialiser COM pour l'encodage." };
-                    SendMessage(ep->hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
-                    return;
-                }
-                auto ve = VideoEncoder::Create(std::move(ep), cancelRequested);
-                ve->Run();
-                CoUninitialize();
-            });
+			g_encodeJob = EncodeJob::Start(std::move(ep));
         }
         break;
     }
@@ -948,7 +936,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
         g_appClosing = true;
         ++g_waveformGeneration;
-        if (g_encodeCancel) g_encodeCancel->store(true);
+        if (g_encodeJob) g_encodeJob->RequestCancel();
         DragAcceptFiles(hWnd, FALSE);
         ui.pTaskbar.Reset();
         DeleteObject(ui.hFontUI);
@@ -1010,7 +998,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    if (g_encodeThread.joinable()) g_encodeThread.join();
+    if (g_encodeJob) g_encodeJob->RequestCancel();
     for (auto& worker : g_waveformThreads)
         if (worker.joinable()) worker.join();
     MFShutdown();
