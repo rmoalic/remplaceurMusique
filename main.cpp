@@ -154,9 +154,7 @@ struct UIState {
     double audioEndSec = 0.0;
     bool   draggingEnd = false;
 
-    // Waveform data — written from WM_WAVEFORM_READY (posted by the glue
-    // lambda passed to WaveformExtractorJob::Start, below), then owned by
-    // the UI thread
+    // Waveform data
     std::vector<float> waveform;
     bool waveformReady = false;
 };
@@ -166,14 +164,6 @@ std::atomic<bool> encoding{ false };
 static std::unique_ptr<EncodeJob> g_encodeJob;
 static WaveformExtractorJob g_waveform(WAVE_SAMPLES);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// WaveformResult — this window's own WM_WAVEFORM_READY payload. Neither
-// WaveformExtractor nor WaveformExtractorJob know this type exists; it's
-// purely how *this* window marshals a callback (running on a worker thread)
-// onto the UI thread via PostMessage. A different front end (WinUI 3, say)
-// would have its own equivalent, or none at all if it can update bound state
-// directly from the callback with its own thread-marshaling primitive.
-// ─────────────────────────────────────────────────────────────────────────────
 struct WaveformResult
 {
     uint64_t generation;
@@ -499,10 +489,6 @@ static void ApplyAudioPath(HWND hWnd, const std::wstring& p)
                        Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
     InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
 
-    // Glue: WaveformExtractorJob knows nothing about HWND/PostMessage — this
-    // lambda is the only place that turns "here are the samples" into a
-    // window message, and it runs on the worker thread, so PostMessage
-    // (not SendMessage) to hand the heap-allocated payload to the UI thread.
     g_waveform.Start(p, dur, [hWnd](uint64_t generation, std::vector<float> values) {
         auto* result = values.empty() ? nullptr : new WaveformResult{ generation, std::move(values) };
         if (!PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, (LPARAM)result))
@@ -830,15 +816,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_qualityIdx, g_volumePct / 100.0f, hWnd
             });
 
-            // Glue: VideoEncoder/EncodeJob know nothing about HWND/messages —
-            // these two lambdas are the only place that turns "progress" and
-            // "done" into WM_ENCODE_PROGRESS/WM_ENCODE_DONE. Both run on the
-            // worker thread.
-            //
-            // onDone uses SendMessage (not PostMessage) deliberately, exactly
-            // like the original code did: it blocks until WndProc has
-            // processed the message, which lets doneMsg live on this lambda's
-            // stack frame instead of needing a heap allocation.
             EncodeCallbacks callbacks;
             callbacks.onProgress = [hWnd](int pct, double etaSecs) {
                 PostMessage(hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, (LPARAM)(LONGLONG)etaSecs);

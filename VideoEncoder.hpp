@@ -14,12 +14,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hns — a duration or absolute position expressed in 100ns units (the native
-// unit throughout Media Foundation). Only the GUI layer deals in seconds;
-// everything past the boundary is Hns. Use Hns::FromSeconds() at that boundary
-// and nowhere else.
-// ─────────────────────────────────────────────────────────────────────────────
 struct Hns
 {
     LONGLONG value = 0;
@@ -55,9 +49,6 @@ struct Hns
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VideoSourceInfo  — produced by OpenVideoReader(), consumed by ConfigureVideoStream()
-// ─────────────────────────────────────────────────────────────────────────────
 struct VideoSourceInfo
 {
     ComPtr<IMFSourceReader> reader;
@@ -78,12 +69,6 @@ struct AudioSourceInfo
 
 constexpr DWORD kInvalidStreamIndex = static_cast<DWORD>(-1);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-stream configuration. These exist so that call sites are self-
-// documenting: passing a VideoStreamConfig where an AudioStreamConfig is
-// expected is a compile error, unlike passing a bare LONGLONG in the wrong
-// argument slot.
-// ─────────────────────────────────────────────────────────────────────────────
 struct VideoStreamConfig
 {
     UINT32 maxBitrate = 0;
@@ -102,13 +87,6 @@ struct AudioStreamConfig
     Hns    rangeHns = Hns::Max();  // trim: length of the selected audio range
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EncodeCallbacks — everything VideoEncoder reports to the outside world.
-// No HWND, no window messages: whoever calls Create() decides what "report
-// progress" and "report completion" mean (post a Win32 message, update an
-// observable property, write to a log, whatever). Both are invoked from the
-// worker thread — marshal to a UI thread inside the callback if needed.
-// ─────────────────────────────────────────────────────────────────────────────
 struct EncodeCallbacks
 {
     // pct in [0, 100), etaSecs is the estimated remaining time.
@@ -119,9 +97,6 @@ struct EncodeCallbacks
     std::function<void(bool ok, std::wstring error)> onDone;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EncodeLoop  — mutable state that only lives inside VideoEncoder::Run()
-// ─────────────────────────────────────────────────────────────────────────────
 struct EncodeLoop
 {
     // Video pump
@@ -144,19 +119,6 @@ struct EncodeLoop
 
 enum class FrameResult { Continue, Done, Error };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VideoEncoder
-//
-// Construction can fail (bad files, unsupported formats, ...), so there is no
-// public constructor: use Create(), which returns nullptr on failure and has
-// already invoked callbacks.onDone(false, ...). Any VideoEncoder you hold is
-// therefore guaranteed fully configured and safe to Run().
-//
-//
-//   auto encoder = VideoEncoder::Create(std::move(params), cancelFlag, callbacks);
-//   if (!encoder) return;   // failure was already reported via callbacks.onDone
-//   encoder->Run();
-// ─────────────────────────────────────────────────────────────────────────────
 class VideoEncoder
 {
 public:
@@ -178,7 +140,6 @@ private:
         VideoStreamConfig vcfg, AudioStreamConfig acfg, Hns outputDurHns);
 
     // ── Init helpers – static: they only get what they need, and report
-    //    failure through the `err` out-param instead of a hidden side channel.
     static ComPtr<IMFDXGIDeviceManager> CreateD3DManager();
 
     static std::unique_ptr<VideoSourceInfo> OpenVideoReader(

@@ -174,11 +174,6 @@ static HRESULT WriteAudioSample(
     return S_OK;
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Construction
-// ─────────────────────────────────────────────────────────────────────────────
-
 VideoEncoder::VideoEncoder(
     std::wstring outputPath, float volumeScale, AudioShortMode audioRepeat,
     std::shared_ptr<std::atomic_bool> cancelRequested, EncodeCallbacks callbacks,
@@ -203,12 +198,6 @@ VideoEncoder::VideoEncoder(
     , m_pcmBytesNum((LONGLONG)(44100 * acfg.channels * 2))
 {
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Factory — the only way to obtain a VideoEncoder. Every step below reports
-// its failure through `err`; ReportInitFailure() is the single point that
-// turns that into a callback invocation.
-// ─────────────────────────────────────────────────────────────────────────────
 
 std::unique_ptr<VideoEncoder> VideoEncoder::Create(
     std::unique_ptr<EncodeParams> params,
@@ -285,17 +274,11 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
         return nullptr;
     }
 
-    // std::unique_ptr<VideoEncoder>(new ...) since the constructor is private
-    // and this is the one place allowed to call it.
     return std::unique_ptr<VideoEncoder>(new VideoEncoder(
             params->outputPath, params->volumeScale, params->audioShortMode,
             std::move(cancelRequested), std::move(callbacks), std::move(devMgr), std::move(writer),
             std::move(vid), std::move(aud), vidIdx, audIdx, vcfg, acfg, outputDurHns));
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Run — the only place, post-construction, that reports failure/completion.
-// ─────────────────────────────────────────────────────────────────────────────
 
 void VideoEncoder::Run()
 {

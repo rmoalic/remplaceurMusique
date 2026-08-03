@@ -15,14 +15,7 @@ EncodeJob::~EncodeJob()
 std::unique_ptr<EncodeJob> EncodeJob::Start(
     std::unique_ptr<EncodeParams> params, EncodeCallbacks callbacks)
 {
-    // unique_ptr<EncodeJob>(new EncodeJob()) since the constructor is private;
-    // Start() is the only place allowed to call it, same reasoning as
-    // VideoEncoder::Create().
     auto job = std::unique_ptr<EncodeJob>(new EncodeJob());
-
-    // Capture the flag by value (shared_ptr), not `job` itself: the thread
-    // must not touch the EncodeJob object, since it can be destroyed (and
-    // Join()'d) from the caller's thread while the worker is still running.
     auto cancelFlag = job->m_cancelRequested;
     auto* finishedFlag = &job->m_finished;
 
