@@ -41,7 +41,8 @@ std::vector<float> WaveformExtractor::Extract(
     ComPtr<IMFSourceReader> pR;
     HRESULT hr = MFCreateSourceReaderFromURL(path.c_str(), nullptr, &pR);
     if (FAILED(hr)) {
-        std::wostringstream oss; oss << L"MFCreateSourceReaderFromURL failed: 0x" << std::hex << hr;
+        std::wostringstream oss;
+        oss << L"MFCreateSourceReaderFromURL failed: 0x" << std::hex << hr;
         LogWaveform(oss.str());
         return {};
     }
@@ -52,7 +53,8 @@ std::vector<float> WaveformExtractor::Extract(
     ComPtr<IMFMediaType> pT;
     hr = MFCreateMediaType(&pT);
     if (FAILED(hr) || !pT) {
-        std::wostringstream oss; oss << L"MFCreateMediaType failed: 0x" << std::hex << hr;
+        std::wostringstream oss;
+        oss << L"MFCreateMediaType failed: 0x" << std::hex << hr;
         LogWaveform(oss.str());
         return {};
     }
@@ -63,17 +65,18 @@ std::vector<float> WaveformExtractor::Extract(
     pT->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     hr = pR->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pT.Get());
     if (FAILED(hr)) {
-        std::wostringstream oss; oss << L"SetCurrentMediaType failed: 0x" << std::hex << hr;
+        std::wostringstream oss;
+        oss << L"SetCurrentMediaType failed: 0x" << std::hex << hr;
         LogWaveform(oss.str());
         return {};
     }
 
     std::vector<float> values(static_cast<size_t>(m_sampleCount), 0.f);
     const uint64_t totalSamples = durationSecs > 0.0
-        ? static_cast<uint64_t>(durationSecs * static_cast<double>(m_sampleRateHz)) : 0ULL;
+                                  ? static_cast<uint64_t>(durationSecs * static_cast<double>(m_sampleRateHz)) : 0ULL;
     const uint64_t samplesPerBucket = totalSamples > 0
-        ? (std::max<uint64_t>)(1ULL, (totalSamples + static_cast<uint64_t>(m_sampleCount) - 1ULL) / static_cast<uint64_t>(m_sampleCount))
-        : 1ULL;
+                                      ? (std::max<uint64_t>)(1ULL, (totalSamples + static_cast<uint64_t>(m_sampleCount) - 1ULL) / static_cast<uint64_t>(m_sampleCount))
+                                      : 1ULL;
     uint64_t sampleIndex = 0ULL;
     const size_t bucketCount = static_cast<size_t>(m_sampleCount);
 
@@ -86,9 +89,10 @@ std::vector<float> WaveformExtractor::Extract(
         ComPtr<IMFSample> pS;
         DWORD flags = 0;
         hr = pR->ReadSample(
-            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &pS);
+                 (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &pS);
         if (FAILED(hr)) {
-            std::wostringstream oss; oss << L"ReadSample failed: 0x" << std::hex << hr;
+            std::wostringstream oss;
+            oss << L"ReadSample failed: 0x" << std::hex << hr;
             LogWaveform(oss.str());
             break;
         }
@@ -98,7 +102,8 @@ std::vector<float> WaveformExtractor::Extract(
         ComPtr<IMFMediaBuffer> pB;
         hr = pS->ConvertToContiguousBuffer(&pB);
         if (FAILED(hr) || !pB) {
-            std::wostringstream oss; oss << L"ConvertToContiguousBuffer failed: 0x" << std::hex << hr;
+            std::wostringstream oss;
+            oss << L"ConvertToContiguousBuffer failed: 0x" << std::hex << hr;
             LogWaveform(oss.str());
             continue;
         }
@@ -107,14 +112,16 @@ std::vector<float> WaveformExtractor::Extract(
         DWORD len = 0;
         hr = pB->Lock(&d, nullptr, &len);
         if (FAILED(hr) || !d) {
-            std::wostringstream oss; oss << L"MediaBuffer::Lock failed: 0x" << std::hex << hr;
+            std::wostringstream oss;
+            oss << L"MediaBuffer::Lock failed: 0x" << std::hex << hr;
             LogWaveform(oss.str());
             continue;
         }
 
         // Ensure even length for 16-bit samples
         if ((len & 1) != 0) {
-            std::wostringstream oss; oss << L"odd buffer length encountered (" << len << L"), trimming last byte";
+            std::wostringstream oss;
+            oss << L"odd buffer length encountered (" << len << L"), trimming last byte";
             LogWaveform(oss.str());
             --len;
         }

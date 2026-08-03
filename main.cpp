@@ -40,6 +40,7 @@
 #include "WaveformExtractorJob.hpp"
 
 using Microsoft::WRL::ComPtr;
+double MF_GetDuration(const std::wstring& path);
 
 #pragma comment(lib,"comctl32.lib")
 #pragma comment(lib,"comdlg32.lib")
@@ -133,7 +134,7 @@ static int            g_volumePct = 100;
 // State — split into UI-only and cross-thread shared
 // ===========================================================================
 
-// Owned exclusively by the UI thread — never touched by EncodeThread
+// Owned exclusively by the UI thread — never touched by a worker thread
 struct UIState {
     HWND   hWnd = nullptr;
     HWND   hWaveWnd = nullptr;
@@ -153,8 +154,9 @@ struct UIState {
     double audioEndSec = 0.0;
     bool   draggingEnd = false;
 
-    // Waveform data — written from WM_WAVEFORM_READY (posted by
-    // WaveformExtractorJob), then owned by UI thread
+    // Waveform data — written from WM_WAVEFORM_READY (posted by the glue
+    // lambda passed to WaveformExtractorJob::Start, below), then owned by
+    // the UI thread
     std::vector<float> waveform;
     bool waveformReady = false;
 };
@@ -163,6 +165,20 @@ static UIState ui;
 std::atomic<bool> encoding{ false };
 static std::unique_ptr<EncodeJob> g_encodeJob;
 static WaveformExtractorJob g_waveform(WAVE_SAMPLES);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WaveformResult — this window's own WM_WAVEFORM_READY payload. Neither
+// WaveformExtractor nor WaveformExtractorJob know this type exists; it's
+// purely how *this* window marshals a callback (running on a worker thread)
+// onto the UI thread via PostMessage. A different front end (WinUI 3, say)
+// would have its own equivalent, or none at all if it can update bound state
+// directly from the callback with its own thread-marshaling primitive.
+// ─────────────────────────────────────────────────────────────────────────────
+struct WaveformResult
+{
+    uint64_t generation;
+    std::vector<float> values;
+};
 
 // ---------------------------------------------------------------------------
 // ITaskbarList3 helpers
@@ -234,10 +250,10 @@ static void DrawWaveform(HWND hWnd, HDC hdc)
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(80, 80, 120));
         HFONT hf = CreateFont(13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         HFONT of = (HFONT)SelectObject(hdc, hf);
         std::wstring txt = ui.audioPath.empty() ? S(IDS_WAVE_LOAD)
-            : (ui.waveformReady ? S(IDS_WAVE_UNAVAIL) : S(IDS_WAVE_ANALYZING));
+                           : (ui.waveformReady ? S(IDS_WAVE_UNAVAIL) : S(IDS_WAVE_ANALYZING));
         DrawText(hdc, txt.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, of);
         DeleteObject(hf);
@@ -302,18 +318,18 @@ static void DrawWaveform(HWND hWnd, HDC hdc)
         SelectObject(hdc, op2);
         SelectObject(hdc, ob);
         DeleteObject(hb);
-        };
+    };
     DrawCursor(cxS, CLR_CUR_START, true);
     DrawCursor(cxE, CLR_CUR_END, false);
 
     if (dur > 0) {
         std::wstring lbl = L"\u25b6 " + SecsToHMS(ui.audioStartSec)
-            + L"  \u2192  " + SecsToHMS(ui.audioEndSec)
-            + L" / " + SecsToHMS(dur);
+                           + L"  \u2192  " + SecsToHMS(ui.audioEndSec)
+                           + L" / " + SecsToHMS(dur);
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(150, 150, 180));
         HFONT hf = CreateFont(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         HFONT of = (HFONT)SelectObject(hdc, hf);
         RECT lr = { 0, H - 16, W - 4, H };
         DrawText(hdc, lbl.c_str(), -1, &lr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -459,7 +475,7 @@ static void ApplyVideoPath(HWND hWnd, const std::wstring& p)
     if (dur > 0) {
         SetDlgItemText(hWnd, ID_EDIT_VID_END, SecsToHMS(dur).c_str());
         SetDlgItemText(hWnd, ID_STATIC_VID_DUR,
-            Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
+                       Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
     }
     else {
         SetDlgItemText(hWnd, ID_STATIC_VID_DUR, S(IDS_DUR_UNAVAIL).c_str());
@@ -480,9 +496,18 @@ static void ApplyAudioPath(HWND hWnd, const std::wstring& p)
     SetDlgItemText(hWnd, ID_EDIT_AUD_END, (dur > 0) ? SecsToHMS(dur).c_str() : L"");
     if (dur > 0)
         SetDlgItemText(hWnd, ID_STATIC_AUD_DUR,
-            Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
+                       Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
     InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
-    g_waveform.Start(p, hWnd, dur);
+
+    // Glue: WaveformExtractorJob knows nothing about HWND/PostMessage — this
+    // lambda is the only place that turns "here are the samples" into a
+    // window message, and it runs on the worker thread, so PostMessage
+    // (not SendMessage) to hand the heap-allocated payload to the UI thread.
+    g_waveform.Start(p, dur, [hWnd](uint64_t generation, std::vector<float> values) {
+        auto* result = values.empty() ? nullptr : new WaveformResult{ generation, std::move(values) };
+        if (!PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, (LPARAM)result))
+            delete result;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -491,38 +516,38 @@ static void ApplyAudioPath(HWND hWnd, const std::wstring& p)
 static HWND MkL(HWND p, const wchar_t* t, int x, int y, int w, int h, bool b = false)
 {
     HWND h2 = CreateWindow(L"STATIC", t, WS_CHILD | WS_VISIBLE | SS_LEFT,
-        x, y, w, h, p, nullptr, nullptr, nullptr);
+                           x, y, w, h, p, nullptr, nullptr, nullptr);
     SendMessage(h2, WM_SETFONT, (WPARAM)(b ? ui.hFontBold : ui.hFontUI), TRUE);
     return h2;
 }
 static HWND MkE(HWND p, int id, const wchar_t* t, int x, int y, int w, int h)
 {
     HWND h2 = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", t,
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
-        x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
+                             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
+                             x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
     SendMessage(h2, WM_SETFONT, (WPARAM)ui.hFontUI, TRUE);
     return h2;
 }
 static HWND MkB(HWND p, int id, const wchar_t* t, int x, int y, int w, int h, bool ac = false)
 {
     HWND h2 = CreateWindow(L"BUTTON", t,
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | (ac ? BS_DEFPUSHBUTTON : 0),
-        x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
+                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | (ac ? BS_DEFPUSHBUTTON : 0),
+                           x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
     SendMessage(h2, WM_SETFONT, (WPARAM)(ac ? ui.hFontBold : ui.hFontUI), TRUE);
     return h2;
 }
 static HWND MkS(HWND p, int id, const wchar_t* t, int x, int y, int w, int h, HFONT f = nullptr)
 {
     HWND h2 = CreateWindow(L"STATIC", t, WS_CHILD | WS_VISIBLE,
-        x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
+                           x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
     SendMessage(h2, WM_SETFONT, (WPARAM)(f ? f : ui.hFontUI), TRUE);
     return h2;
 }
 static HWND MkC(HWND p, int id, int x, int y, int w, int h)
 {
     HWND h2 = CreateWindow(WC_COMBOBOX, L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-        x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
+                           WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                           x, y, w, h, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
     SendMessage(h2, WM_SETFONT, (WPARAM)ui.hFontUI, TRUE);
     return h2;
 }
@@ -537,16 +562,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         ui.hWnd = hWnd;
         ui.hBrushBg = CreateSolidBrush(CLR_BG);
         ui.hFontUI = CreateFont(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         ui.hFontBold = CreateFont(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         ui.hFontSm = CreateFont(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         HFONT hFT = CreateFont(18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
         CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
-            IID_PPV_ARGS(&ui.pTaskbar));
+                         IID_PPV_ARGS(&ui.pTaskbar));
         if (ui.pTaskbar) ui.pTaskbar->HrInit();
 
         DragAcceptFiles(hWnd, TRUE);
@@ -597,7 +622,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             wcw.lpszClassName = L"WaveformClass";
             RegisterClassEx(&wcw);
             ui.hWaveWnd = CreateWindowEx(WS_EX_CLIENTEDGE, L"WaveformClass", L"",
-                WS_CHILD | WS_VISIBLE, MARGIN, y, CW, WAVEFORM_H, hWnd, nullptr, g_hInst, nullptr);
+                                         WS_CHILD | WS_VISIBLE, MARGIN, y, CW, WAVEFORM_H, hWnd, nullptr, g_hInst, nullptr);
         }
         y += WAVEFORM_H + 4;
         MkS(hWnd, ID_STATIC_AUD_DUR, L"", MARGIN, y, CW, 16, ui.hFontSm);
@@ -606,8 +631,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Volume slider
         MkL(hWnd, S(IDS_VOLUME).c_str(), MARGIN, y + 3, 64, 18);
         HWND hSlider = CreateWindow(TRACKBAR_CLASS, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-            MARGIN + 66, y, 220, ROW_H, hWnd, (HMENU)ID_SLIDER_VOLUME, nullptr, nullptr);
+                                    WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                                    MARGIN + 66, y, 220, ROW_H, hWnd, (HMENU)ID_SLIDER_VOLUME, nullptr, nullptr);
         SendMessage(hSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
         SendMessage(hSlider, TBM_SETPOS, TRUE, g_volumePct);
         MkS(hWnd, ID_STATIC_VOL, L"100 %", MARGIN + 290, y + 3, 60, 18, ui.hFontSm);
@@ -636,13 +661,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // Go button
         CreateWindow(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            MARGIN, y, CW, 2, hWnd, nullptr, nullptr, nullptr);
+                     MARGIN, y, CW, 2, hWnd, nullptr, nullptr, nullptr);
         y += 10;
         MkB(hWnd, ID_BTN_GO, S(IDS_BTN_GO).c_str(), WINW / 2 - 115, y, 230, 36, true);
         y += 46;
 
         HWND hProg = CreateWindow(PROGRESS_CLASS, L"", WS_CHILD,
-            MARGIN, y, CW, 14, hWnd, (HMENU)ID_PROGRESS, nullptr, nullptr);
+                                  MARGIN, y, CW, 14, hWnd, (HMENU)ID_PROGRESS, nullptr, nullptr);
         SendMessage(hProg, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
         SendMessage(hProg, PBM_SETPOS, 0, 0);
         ShowWindow(hProg, SW_HIDE);
@@ -653,7 +678,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         RECT wr = { 0, 0, WINW, y + MARGIN };
         AdjustWindowRect(&wr, (DWORD)GetWindowLong(hWnd, GWL_STYLE), FALSE);
         SetWindowPos(hWnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
-            SWP_NOMOVE | SWP_NOZORDER);
+                     SWP_NOMOVE | SWP_NOZORDER);
         break;
     }
 
@@ -736,7 +761,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         else if (id == ID_COMBO_AUDSHORT && code == CBN_SELCHANGE) {
             g_audioShortMode = (AudioShortMode)
-                SendDlgItemMessage(hWnd, ID_COMBO_AUDSHORT, CB_GETCURSEL, 0, 0);
+                               SendDlgItemMessage(hWnd, ID_COMBO_AUDSHORT, CB_GETCURSEL, 0, 0);
         }
         else if (id == ID_BTN_GO) {
             if (encoding) break;
@@ -785,7 +810,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (out.empty()) break;
             if (SameFilePath(out, video) || SameFilePath(out, audio)) {
                 MessageBox(hWnd, L"Le fichier de sortie doit être différent des fichiers source.",
-                    S(IDS_ERR_TITLE).c_str(), MB_ICONWARNING);
+                           S(IDS_ERR_TITLE).c_str(), MB_ICONWARNING);
                 break;
             }
 
@@ -803,8 +828,26 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 video, audio, out, vidStart, vidEnd,
                 audStart, audEnd, g_audioShortMode,
                 g_qualityIdx, g_volumePct / 100.0f, hWnd
-                });
-            g_encodeJob = EncodeJob::Start(std::move(ep));
+            });
+
+            // Glue: VideoEncoder/EncodeJob know nothing about HWND/messages —
+            // these two lambdas are the only place that turns "progress" and
+            // "done" into WM_ENCODE_PROGRESS/WM_ENCODE_DONE. Both run on the
+            // worker thread.
+            //
+            // onDone uses SendMessage (not PostMessage) deliberately, exactly
+            // like the original code did: it blocks until WndProc has
+            // processed the message, which lets doneMsg live on this lambda's
+            // stack frame instead of needing a heap allocation.
+            EncodeCallbacks callbacks;
+            callbacks.onProgress = [hWnd](int pct, double etaSecs) {
+                PostMessage(hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, (LPARAM)(LONGLONG)etaSecs);
+            };
+            callbacks.onDone = [hWnd](bool ok, std::wstring error) {
+                ENCODE_DONE_MSG doneMsg{ ok, error };
+                SendMessage(hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
+            };
+            g_encodeJob = EncodeJob::Start(std::move(ep), std::move(callbacks));
         }
         break;
     }
@@ -834,7 +877,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             TBError();
             SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_ERR_STATUS).c_str());
             MessageBox(hWnd, (S(IDS_ERR_TITLE) + L":\n\n" + encMsg->error).c_str(),
-                S(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
+                       S(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
         }
         TBDone();
         break;
@@ -893,7 +936,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
     MFStartup(MF_VERSION);
     INITCOMMONCONTROLSEX icc = { sizeof(icc),
                                  ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES
-    };
+                               };
     InitCommonControlsEx(&icc);
 
     WNDCLASSEX wc = {};
@@ -905,13 +948,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
     wc.lpszClassName = L"RemplaceurMusique";
     wc.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_MY_APP_ICON));
     wc.hIconSm = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDI_MY_APP_ICON),
-        IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+                                  IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
     RegisterClassEx(&wc);
 
     HWND hWnd = CreateWindow(L"RemplaceurMusique", S(IDS_APP_TITLE).c_str(),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, WINW, 800,
-        nullptr, nullptr, hInst, nullptr);
+                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                             CW_USEDEFAULT, CW_USEDEFAULT, WINW, 800,
+                             nullptr, nullptr, hInst, nullptr);
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 

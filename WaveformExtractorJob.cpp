@@ -1,5 +1,9 @@
 #include "WaveformExtractorJob.hpp"
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>   // CoInitializeEx/CoUninitialize only
+#include <objbase.h>   // définit CoInitializeEx, CoUninitialize, COINIT_* constantes
+
 WaveformExtractorJob::WaveformExtractorJob(int sampleCount, int sampleRateHz)
     : m_extractor(sampleCount, sampleRateHz)
 {
@@ -11,13 +15,14 @@ WaveformExtractorJob::~WaveformExtractorJob()
     Join();
 }
 
-uint64_t WaveformExtractorJob::Start(std::wstring path, HWND hWnd, double durationSecs)
+uint64_t WaveformExtractorJob::Start(std::wstring path, double durationSecs, ReadyCallback onReady)
 {
     const uint64_t generation = ++m_generation;
-    m_threads.emplace_back([this, p = std::move(path), hWnd, generation, durationSecs] {
+    m_threads.emplace_back(
+    [this, p = std::move(path), generation, durationSecs, cb = std::move(onReady)]() mutable {
         const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (FAILED(coHr)) return;
-        RunOnThread(p, hWnd, generation, durationSecs);
+        RunOnThread(std::move(p), generation, durationSecs, std::move(cb));
         CoUninitialize();
     });
     return generation;
@@ -35,8 +40,13 @@ void WaveformExtractorJob::Join()
     m_threads.clear();
 }
 
-void WaveformExtractorJob::RunOnThread(std::wstring path, HWND hWnd, uint64_t generation, double durationSecs)
+void WaveformExtractorJob::RunOnThread(
+    std::wstring path, uint64_t generation, double durationSecs, ReadyCallback onReady)
 {
+    // Checked both inside WaveformExtractor::Extract (to abort mid-decode)
+    // and again here after it returns (to avoid firing the callback for a
+    // request that was superseded/shut down while Extract() was finishing
+    // its last buffer).
     auto shouldStop = [this, generation] {
         return m_stopRequested.load() || generation != m_generation.load();
     };
@@ -47,12 +57,6 @@ void WaveformExtractorJob::RunOnThread(std::wstring path, HWND hWnd, uint64_t ge
 
     if (shouldStop()) return;
 
-    if (values.empty()) {
-        PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, 0);
-        return;
-    }
-
-    auto* result = new WaveformResult{ generation, std::move(values) };
-    if (!PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, (LPARAM)result))
-        delete result;
+    if (onReady)
+        onReady(generation, std::move(values));
 }

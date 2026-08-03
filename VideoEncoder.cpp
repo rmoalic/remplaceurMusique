@@ -1,6 +1,5 @@
 ﻿#include <memory>
 #include <algorithm>
-#include <optional>
 #include <atomic>
 
 #define WIN32_LEAN_AND_MEAN
@@ -20,7 +19,6 @@
 using namespace Microsoft::WRL;
 
 #include "VideoEncoder.hpp"
-#include "Encode.hpp"
 
 static void WarnMF(const wchar_t* message, HRESULT hr = S_OK)
 {
@@ -32,15 +30,12 @@ static void WarnMF(const wchar_t* message, HRESULT hr = S_OK)
     OutputDebugStringW(buffer);
 }
 
-// Single place that turns an init-time failure into a UI notification.
-// Nothing else in the init path touches HWND/SendMessage.
-static void SendFailure(HWND hWnd, const std::wstring& err)
+// Single place that turns an init-time failure into a callback invocation.
+// Nothing else in the init path knows callbacks exist.
+static void ReportInitFailure(const EncodeCallbacks& callbacks, const std::wstring& err)
 {
-    if (hWnd && IsWindow(hWnd)) {
-        std::wstring msg = err.empty() ? L"Erreur inconnue lors de l'encodage." : err;
-        ENCODE_DONE_MSG doneMsg = { false, msg };
-        SendMessage(hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
-    }
+    if (callbacks.onDone)
+        callbacks.onDone(false, err.empty() ? L"Erreur inconnue lors de l'encodage." : err);
 }
 
 static bool WriteSilenceChunk(
@@ -180,24 +175,22 @@ static HRESULT WriteAudioSample(
 }
 
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
 
 VideoEncoder::VideoEncoder(
-    HWND hWnd, std::wstring outputPath, float volumeScale, AudioShortMode audioRepeat,
-    std::shared_ptr<std::atomic_bool> cancelRequested,
+    std::wstring outputPath, float volumeScale, AudioShortMode audioRepeat,
+    std::shared_ptr<std::atomic_bool> cancelRequested, EncodeCallbacks callbacks,
     ComPtr<IMFDXGIDeviceManager> devMgr, ComPtr<IMFSinkWriter> writer,
     std::unique_ptr<VideoSourceInfo> vid, std::unique_ptr<AudioSourceInfo> aud,
     DWORD vidIdx, DWORD audIdx,
     VideoStreamConfig vcfg, AudioStreamConfig acfg, Hns outputDurHns)
-    : m_hWnd(hWnd)
-    , m_outputPath(std::move(outputPath))
+    : m_outputPath(std::move(outputPath))
     , m_volumescale(volumeScale)
     , m_audio_repeat(audioRepeat)
     , m_cancelRequested(std::move(cancelRequested))
+    , m_callbacks(std::move(callbacks))
     , m_devMgr(std::move(devMgr))
     , m_writer(std::move(writer))
     , m_vid(std::move(vid))
@@ -213,15 +206,15 @@ VideoEncoder::VideoEncoder(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Factory — the only way to obtain a VideoEncoder. Every step below reports
-// its failure through `err`; SendFailure() is the single point that turns
-// that into a UI notification.
+// its failure through `err`; ReportInitFailure() is the single point that
+// turns that into a callback invocation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::unique_ptr<VideoEncoder> VideoEncoder::Create(
     std::unique_ptr<EncodeParams> params,
-    std::shared_ptr<std::atomic_bool> cancelRequested)
+    std::shared_ptr<std::atomic_bool> cancelRequested,
+    EncodeCallbacks callbacks)
 {
-    const HWND hWnd = params->hWnd;
     std::wstring err;
 
     const QualityPreset preset = PRESETS[params->qualityIdx];
@@ -259,49 +252,49 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
 
     auto vid = OpenVideoReader(devMgr, params->videoPath, vcfg, err);
     if (!vid) {
-        SendFailure(hWnd, err);
+        ReportInitFailure(callbacks, err);
         return nullptr;
     }
 
     auto aud = OpenAudioReader(params->audioPath, acfg, err);
     if (!aud) {
-        SendFailure(hWnd, err);
+        ReportInitFailure(callbacks, err);
         return nullptr;
     }
 
     ComPtr<IMFSinkWriter> writer = CreateSinkWriter(devMgr, params->outputPath, err);
     if (!writer) {
-        SendFailure(hWnd, err);
+        ReportInitFailure(callbacks, err);
         return nullptr;
     }
 
     DWORD vidIdx = ConfigureVideoStream(*vid, writer.Get(), vcfg, err);
     if (vidIdx == kInvalidStreamIndex) {
-        SendFailure(hWnd, err);
+        ReportInitFailure(callbacks, err);
         return nullptr;
     }
 
     DWORD audIdx = ConfigureAudioStream(*aud, writer.Get(), acfg, err);
     if (audIdx == kInvalidStreamIndex) {
-        SendFailure(hWnd, err);
+        ReportInitFailure(callbacks, err);
         return nullptr;
     }
 
     if (!SeekVideoToStart(vid->reader.Get(), vcfg.startHns, err)) {
-        SendFailure(hWnd, err);
+        ReportInitFailure(callbacks, err);
         return nullptr;
     }
 
     // std::unique_ptr<VideoEncoder>(new ...) since the constructor is private
     // and this is the one place allowed to call it.
     return std::unique_ptr<VideoEncoder>(new VideoEncoder(
-            hWnd, params->outputPath, params->volumeScale, params->audioShortMode,
-            std::move(cancelRequested), std::move(devMgr), std::move(writer),
+            params->outputPath, params->volumeScale, params->audioShortMode,
+            std::move(cancelRequested), std::move(callbacks), std::move(devMgr), std::move(writer),
             std::move(vid), std::move(aud), vidIdx, audIdx, vcfg, acfg, outputDurHns));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Run — the only place, post-construction, that reports failure to the UI.
+// Run — the only place, post-construction, that reports failure/completion.
 // ─────────────────────────────────────────────────────────────────────────────
 
 void VideoEncoder::Run()
@@ -327,12 +320,11 @@ void VideoEncoder::Run()
             return ReportFailure(err);
     }
 
-    PostMessage(m_hWnd, WM_ENCODE_PROGRESS, 100, 0);
+    if (m_callbacks.onProgress) m_callbacks.onProgress(100, 0.0);
     if (FAILED(m_writer->Finalize()))
         return ReportFailure(L"Impossible de finaliser le fichier MP4.");
 
-    ENCODE_DONE_MSG doneMsg = { true, L"" };
-    SendMessage(m_hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
+    if (m_callbacks.onDone) m_callbacks.onDone(true, L"");
 }
 
 
@@ -824,8 +816,8 @@ void VideoEncoder::ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG ma
                          ? (double)relHns / (elapsed * 1e7) : 1.0;
     const double eta = ((maxDurHns - relHns) / 1e7) / ratio;
 
-    PostMessage(m_hWnd, WM_ENCODE_PROGRESS,
-                (WPARAM)pct, (LPARAM)(LONGLONG)eta);
+    if (m_callbacks.onProgress)
+        m_callbacks.onProgress(pct, eta);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -834,11 +826,8 @@ void VideoEncoder::ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG ma
 
 void VideoEncoder::ReportFailure(const std::wstring& msg)
 {
-    if (m_hWnd && IsWindow(m_hWnd)) {
-        std::wstring errmsg = msg.empty() ? L"Erreur inconnue lors de l'encodage." : msg;
-        ENCODE_DONE_MSG doneMsg = { false, errmsg };
-        SendMessage(m_hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
-    }
+    if (m_callbacks.onDone)
+        m_callbacks.onDone(false, msg.empty() ? L"Erreur inconnue lors de l'encodage." : msg);
 }
 
 bool VideoEncoder::IsCancellationRequested() const
@@ -853,19 +842,6 @@ void VideoEncoder::Cancel()
         DeleteFile(m_outputPath.c_str());
     }
 
-    if (m_hWnd && IsWindow(m_hWnd)) {
-        ENCODE_DONE_MSG doneMsg = { false, L"Annulé." };
-        SendMessage(m_hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, (LPARAM)0);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Free function — replaces the original EncodeThread
-// ─────────────────────────────────────────────────────────────────────────────
-
-static void EncodeThread(std::unique_ptr<EncodeParams> params, std::shared_ptr<std::atomic_bool> cancelRequested)
-{
-    auto encoder = VideoEncoder::Create(std::move(params), cancelRequested);
-    if (!encoder) return; // failure already reported by Create()
-    encoder->Run();
+    if (m_callbacks.onDone)
+        m_callbacks.onDone(false, L"Annulé.");
 }
