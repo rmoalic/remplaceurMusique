@@ -154,7 +154,7 @@ struct UIState {
     double audioEndSec = 0.0;
     bool   draggingEnd = false;
 
-    // Waveform data
+    // Waveform
     std::vector<float> waveform;
     bool waveformReady = false;
 };
@@ -221,6 +221,66 @@ static std::wstring CtrlText(HWND p, int id)
 static void ErrBox(HWND h, UINT msgId, UINT titleId = IDS_ERR_TITLE_VAL)
 {
     MessageBox(h, S(msgId).c_str(), S(titleId).c_str(), MB_ICONWARNING);
+}
+
+static std::wstring LocalizeEncodeError(EncodeError err)
+{
+    switch (err) {
+    case EncodeError::VideoOpenFailed:
+        return L"Impossible d'ouvrir la vidéo source.";
+    case EncodeError::VideoStreamSelectFailed:
+        return L"Impossible de sélectionner le flux vidéo source.";
+    case EncodeError::VideoDecodeFailed:
+        return L"Impossible de décoder la vidéo.";
+    case EncodeError::VideoTypeReadFailed:
+        return L"Erreur lecture type vidéo.";
+    case EncodeError::VideoDimensionsInvalid:
+        return L"Dimensions vidéo source invalides.";
+    case EncodeError::AudioOpenFailed:
+        return L"Impossible d'ouvrir le fichier audio.";
+    case EncodeError::AudioStreamSelectFailed:
+        return L"Impossible de sélectionner le flux audio source.";
+    case EncodeError::AudioFormatFailed:
+        return L"Impossible de décoder l'audio au format PCM demandé.";
+    case EncodeError::AudioSeekFailed:
+        return L"Impossible de positionner l'audio source.";
+    case EncodeError::AudioTypeReadFailed:
+        return L"Impossible de lire le format PCM audio.";
+    case EncodeError::OutputCreateFailed:
+        return L"Impossible de créer le fichier de sortie.";
+    case EncodeError::VideoStreamAddFailed:
+        return L"Erreur ajout flux H264.";
+    case EncodeError::VideoStreamTypeIncompatible:
+        return L"Type vidéo incompatible avec l'encodeur H264.";
+    case EncodeError::AudioStreamAddFailed:
+        return L"Erreur ajout flux AAC.";
+    case EncodeError::AudioStreamConfigFailed:
+        return L"Erreur configuration AAC. (Windows 7+)";
+    case EncodeError::VideoSeekFailed:
+        return L"Impossible de positionner la vidéo source.";
+    case EncodeError::SinkWriterBeginFailed:
+        return L"Erreur démarrage écriture MP4.";
+    case EncodeError::SinkWriterFinalizeFailed:
+        return L"Impossible de finaliser le fichier MP4.";
+    case EncodeError::VideoReadFailed:
+        return L"Erreur pendant la lecture de la vidéo.";
+    case EncodeError::VideoWriteFailed:
+        return L"Erreur pendant l'écriture de la vidéo.";
+    case EncodeError::AudioReadFailed:
+        return L"Erreur pendant la lecture de l'audio.";
+    case EncodeError::AudioWriteFailed:
+        return L"Erreur pendant l'écriture de l'audio.";
+    case EncodeError::AudioSilenceWriteFailed:
+        return L"Erreur pendant l'écriture du silence audio.";
+    case EncodeError::AudioLoopRestartFailed:
+        return L"Impossible de relancer l'audio source.";
+    case EncodeError::Cancelled:
+        return L"Annulé.";
+    case EncodeError::None:
+    case EncodeError::Unknown:
+    default:
+        return L"Erreur inconnue lors de l'encodage.";
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -820,8 +880,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             callbacks.onProgress = [hWnd](int pct, double etaSecs) {
                 PostMessage(hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, (LPARAM)(LONGLONG)etaSecs);
             };
-            callbacks.onDone = [hWnd](bool ok, std::wstring error) {
-                ENCODE_DONE_MSG doneMsg{ ok, error };
+            callbacks.onDone = [hWnd](bool ok, EncodeErrorInfo error) {
+                ENCODE_DONE_MSG doneMsg{ ok, LocalizeEncodeError(error.code) };
                 SendMessage(hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
             };
             g_encodeJob = EncodeJob::Start(std::move(ep), std::move(callbacks));

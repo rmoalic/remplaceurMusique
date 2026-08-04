@@ -1,6 +1,4 @@
 ﻿#pragma once
-#include "Encode.hpp"
-
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -13,6 +11,9 @@
 #include <functional>
 
 using Microsoft::WRL::ComPtr;
+
+struct EncodeParams;
+struct QualityPreset;
 
 struct Hns
 {
@@ -49,6 +50,58 @@ struct Hns
     }
 };
 
+enum class EncodeError
+{
+    None = 0,
+
+    // Init: video source
+    VideoOpenFailed,
+    VideoStreamSelectFailed,
+    VideoDecodeFailed,
+    VideoTypeReadFailed,
+    VideoDimensionsInvalid,
+
+    // Init: audio source
+    AudioOpenFailed,
+    AudioStreamSelectFailed,
+    AudioFormatFailed,
+    AudioSeekFailed,
+    AudioTypeReadFailed,
+
+    // Init: sink writer / streams
+    OutputCreateFailed,
+    VideoStreamAddFailed,
+    VideoStreamTypeIncompatible,
+    AudioStreamAddFailed,
+    AudioStreamConfigFailed,
+    VideoSeekFailed,
+
+    // Run
+    SinkWriterBeginFailed,
+    SinkWriterFinalizeFailed,
+    VideoReadFailed,
+    VideoWriteFailed,
+    AudioReadFailed,
+    AudioWriteFailed,
+    AudioSilenceWriteFailed,
+    AudioLoopRestartFailed,
+
+    Cancelled,
+    Unknown,
+};
+
+struct EncodeErrorInfo
+{
+    EncodeError code = EncodeError::None;
+    HRESULT hr = S_OK;
+
+    EncodeErrorInfo() = default;
+    EncodeErrorInfo(EncodeError c, HRESULT h = S_OK) : code(c), hr(h) {}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VideoSourceInfo  — produced by OpenVideoReader(), consumed by ConfigureVideoStream()
+// ─────────────────────────────────────────────────────────────────────────────
 struct VideoSourceInfo
 {
     ComPtr<IMFSourceReader> reader;
@@ -93,8 +146,8 @@ struct EncodeCallbacks
     std::function<void(int pct, double etaSecs)> onProgress;
 
     // Called exactly once, whether the encode succeeded, failed, or was
-    // cancelled. error is empty when ok is true.
-    std::function<void(bool ok, std::wstring error)> onDone;
+    // cancelled. error.code is EncodeError::None when ok is true.
+    std::function<void(bool ok, EncodeErrorInfo error)> onDone;
 };
 
 struct EncodeLoop
@@ -140,33 +193,34 @@ private:
         VideoStreamConfig vcfg, AudioStreamConfig acfg, Hns outputDurHns);
 
     // ── Init helpers – static: they only get what they need, and report
+    //    failure through the `err` out-param instead of a hidden side channel.
     static ComPtr<IMFDXGIDeviceManager> CreateD3DManager();
 
     static std::unique_ptr<VideoSourceInfo> OpenVideoReader(
         const ComPtr<IMFDXGIDeviceManager>& devMgr, const std::wstring& vfile,
-        const VideoStreamConfig& cfg, std::wstring& err);
+        const VideoStreamConfig& cfg, EncodeErrorInfo& err);
 
     static std::unique_ptr<AudioSourceInfo> OpenAudioReader(
-        const std::wstring& afile, const AudioStreamConfig& cfg, std::wstring& err);
+        const std::wstring& afile, const AudioStreamConfig& cfg, EncodeErrorInfo& err);
 
     static ComPtr<IMFSinkWriter> CreateSinkWriter(
-        const ComPtr<IMFDXGIDeviceManager>& devMgr, const std::wstring& outfile, std::wstring& err);
+        const ComPtr<IMFDXGIDeviceManager>& devMgr, const std::wstring& outfile, EncodeErrorInfo& err);
 
     static DWORD ConfigureVideoStream(
-        const VideoSourceInfo& vid, IMFSinkWriter* writer, const VideoStreamConfig& cfg, std::wstring& err);
+        const VideoSourceInfo& vid, IMFSinkWriter* writer, const VideoStreamConfig& cfg, EncodeErrorInfo& err);
 
     static DWORD ConfigureAudioStream(
-        const AudioSourceInfo& aud, IMFSinkWriter* writer, const AudioStreamConfig& cfg, std::wstring& err);
+        const AudioSourceInfo& aud, IMFSinkWriter* writer, const AudioStreamConfig& cfg, EncodeErrorInfo& err);
 
-    static bool SeekVideoToStart(IMFSourceReader* reader, Hns start, std::wstring& err);
+    static bool SeekVideoToStart(IMFSourceReader* reader, Hns start, EncodeErrorInfo& err);
 
     // ── Encode-loop helpers ───────────────────────────────────────────────────
-    FrameResult ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DWORD vidIdx, std::wstring& err);
-    bool ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx, std::wstring& err);
+    FrameResult ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* writer, DWORD vidIdx, EncodeErrorInfo& err);
+    bool ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD audIdx, EncodeErrorInfo& err);
     void ReportProgress(EncodeLoop& loop, LONGLONG relHns, LONGLONG maxDurHns);
 
     // ── Runtime error / cancellation (post-construction only) ────────────────
-    void ReportFailure(const std::wstring& msg);
+    void ReportFailure(EncodeErrorInfo err);
     bool IsCancellationRequested() const;
     void Cancel();
 

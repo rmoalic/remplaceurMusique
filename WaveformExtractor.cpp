@@ -73,10 +73,10 @@ std::vector<float> WaveformExtractor::Extract(
 
     std::vector<float> values(static_cast<size_t>(m_sampleCount), 0.f);
     const uint64_t totalSamples = durationSecs > 0.0
-        ? static_cast<uint64_t>(durationSecs * static_cast<double>(m_sampleRateHz)) : 0ULL;
+                                  ? static_cast<uint64_t>(durationSecs * static_cast<double>(m_sampleRateHz)) : 0ULL;
     const uint64_t samplesPerBucket = totalSamples > 0
-        ? (std::max<uint64_t>)(1ULL, (totalSamples + static_cast<uint64_t>(m_sampleCount) - 1ULL) / static_cast<uint64_t>(m_sampleCount))
-        : 1ULL;
+                                      ? (std::max<uint64_t>)(1ULL, (totalSamples + static_cast<uint64_t>(m_sampleCount) - 1ULL) / static_cast<uint64_t>(m_sampleCount))
+                                      : 1ULL;
     uint64_t sampleIndex = 0ULL;
     const size_t bucketCount = static_cast<size_t>(m_sampleCount);
 
@@ -89,7 +89,7 @@ std::vector<float> WaveformExtractor::Extract(
         ComPtr<IMFSample> pS;
         DWORD flags = 0;
         hr = pR->ReadSample(
-            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &pS);
+                 (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &pS);
         if (FAILED(hr)) {
             wchar_t buf[256];
             swprintf_s(buf, L"ReadSample failed: 0x%08X", static_cast<UINT32>(hr));
