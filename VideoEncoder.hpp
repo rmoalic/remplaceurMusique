@@ -9,11 +9,11 @@
 #include <string>
 #include <atomic>
 #include <functional>
+#include "Encode.hpp"
 
 using Microsoft::WRL::ComPtr;
 
-struct EncodeParams;
-struct QualityPreset;
+
 
 struct Hns
 {
