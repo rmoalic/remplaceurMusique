@@ -227,59 +227,59 @@ static std::wstring LocalizeEncodeError(EncodeError err)
 {
     switch (err) {
     case EncodeError::VideoOpenFailed:
-        return L"Impossible d'ouvrir la vidéo source.";
+        return S(IDS_ENC_ERR_VIDEO_OPEN_FAILED);
     case EncodeError::VideoStreamSelectFailed:
-        return L"Impossible de sélectionner le flux vidéo source.";
+        return S(IDS_ENC_ERR_VIDEO_STREAM_SELECT_FAILED);
     case EncodeError::VideoDecodeFailed:
-        return L"Impossible de décoder la vidéo.";
+        return S(IDS_ENC_ERR_VIDEO_DECODE_FAILED);
     case EncodeError::VideoTypeReadFailed:
-        return L"Erreur lecture type vidéo.";
+        return S(IDS_ENC_ERR_VIDEO_TYPE_READ_FAILED);
     case EncodeError::VideoDimensionsInvalid:
-        return L"Dimensions vidéo source invalides.";
+        return S(IDS_ENC_ERR_VIDEO_DIMENSIONS_INVALID);
     case EncodeError::AudioOpenFailed:
-        return L"Impossible d'ouvrir le fichier audio.";
+        return S(IDS_ENC_ERR_AUDIO_OPEN_FAILED);
     case EncodeError::AudioStreamSelectFailed:
-        return L"Impossible de sélectionner le flux audio source.";
+        return S(IDS_ENC_ERR_AUDIO_STREAM_SELECT_FAILED);
     case EncodeError::AudioFormatFailed:
-        return L"Impossible de décoder l'audio au format PCM demandé.";
+        return S(IDS_ENC_ERR_AUDIO_FORMAT_FAILED);
     case EncodeError::AudioSeekFailed:
-        return L"Impossible de positionner l'audio source.";
+        return S(IDS_ENC_ERR_AUDIO_SEEK_FAILED);
     case EncodeError::AudioTypeReadFailed:
-        return L"Impossible de lire le format PCM audio.";
+        return S(IDS_ENC_ERR_AUDIO_TYPE_READ_FAILED);
     case EncodeError::OutputCreateFailed:
-        return L"Impossible de créer le fichier de sortie.";
+        return S(IDS_ENC_ERR_OUTPUT_CREATE_FAILED);
     case EncodeError::VideoStreamAddFailed:
-        return L"Erreur ajout flux H264.";
+        return S(IDS_ENC_ERR_VIDEO_STREAM_ADD_FAILED);
     case EncodeError::VideoStreamTypeIncompatible:
-        return L"Type vidéo incompatible avec l'encodeur H264.";
+        return S(IDS_ENC_ERR_VIDEO_STREAM_TYPE_INCOMPATIBLE);
     case EncodeError::AudioStreamAddFailed:
-        return L"Erreur ajout flux AAC.";
+        return S(IDS_ENC_ERR_AUDIO_STREAM_ADD_FAILED);
     case EncodeError::AudioStreamConfigFailed:
-        return L"Erreur configuration AAC. (Windows 7+)";
+        return S(IDS_ENC_ERR_AUDIO_STREAM_CONFIG_FAILED);
     case EncodeError::VideoSeekFailed:
-        return L"Impossible de positionner la vidéo source.";
+        return S(IDS_ENC_ERR_VIDEO_SEEK_FAILED);
     case EncodeError::SinkWriterBeginFailed:
-        return L"Erreur démarrage écriture MP4.";
+        return S(IDS_ENC_ERR_SINK_WRITER_BEGIN_FAILED);
     case EncodeError::SinkWriterFinalizeFailed:
-        return L"Impossible de finaliser le fichier MP4.";
+        return S(IDS_ENC_ERR_SINK_WRITER_FINALIZE_FAILED);
     case EncodeError::VideoReadFailed:
-        return L"Erreur pendant la lecture de la vidéo.";
+        return S(IDS_ENC_ERR_VIDEO_READ_FAILED);
     case EncodeError::VideoWriteFailed:
-        return L"Erreur pendant l'écriture de la vidéo.";
+        return S(IDS_ENC_ERR_VIDEO_WRITE_FAILED);
     case EncodeError::AudioReadFailed:
-        return L"Erreur pendant la lecture de l'audio.";
+        return S(IDS_ENC_ERR_AUDIO_READ_FAILED);
     case EncodeError::AudioWriteFailed:
-        return L"Erreur pendant l'écriture de l'audio.";
+        return S(IDS_ENC_ERR_AUDIO_WRITE_FAILED);
     case EncodeError::AudioSilenceWriteFailed:
-        return L"Erreur pendant l'écriture du silence audio.";
+        return S(IDS_ENC_ERR_AUDIO_SILENCE_WRITE_FAILED);
     case EncodeError::AudioLoopRestartFailed:
-        return L"Impossible de relancer l'audio source.";
+        return S(IDS_ENC_ERR_AUDIO_LOOP_RESTART_FAILED);
     case EncodeError::Cancelled:
-        return L"Annulé.";
+        return S(IDS_ENC_ERR_CANCELLED);
     case EncodeError::None:
     case EncodeError::Unknown:
     default:
-        return L"Erreur inconnue lors de l'encodage.";
+        return S(IDS_ENC_ERR_UNKNOWN);
     }
 }
 
