@@ -73,8 +73,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="EncodeJob.cpp" />
+    <ClCompile Include="FileUtils.cpp" />
     <ClCompile Include="MainWindow.cpp" />
+    <ClCompile Include="MediaUtils.cpp" />
+    <ClCompile Include="StringUtils.cpp" />
     <ClCompile Include="VideoEncoder.cpp" />
+    <ClCompile Include="Win32Utils.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="WaveformExtractor.cpp" />
     <ClCompile Include="WaveformExtractorJob.cpp" />
@@ -82,11 +86,15 @@
   <ItemGroup>
     <ClInclude Include="Encode.hpp" />
     <ClInclude Include="EncodeJob.hpp" />
+    <ClInclude Include="FileUtils.hpp" />
     <ClInclude Include="MainWindow.hpp" />
+    <ClInclude Include="MediaUtils.hpp" />
     <ClInclude Include="resource.hpp" />
+    <ClInclude Include="StringUtils.hpp" />
     <ClInclude Include="VideoEncoder.hpp" />
     <ClInclude Include="WaveformExtractor.hpp" />
     <ClInclude Include="WaveformExtractorJob.hpp" />
+    <ClInclude Include="Win32Utils.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />

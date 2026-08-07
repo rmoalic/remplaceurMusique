@@ -1,5 +1,8 @@
 #include "MainWindow.hpp"
 #include "VideoEncoder.hpp"
+#include "StringUtils.hpp"
+#include "FileUtils.hpp"
+#include "Win32Utils.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -499,11 +502,11 @@ void MainWindow::OnReplaceAudio()
     std::wstring video = GetControlText(m_ui.hWnd, ID_EDIT_VIDEO);
     std::wstring audio = GetControlText(m_ui.hWnd, ID_EDIT_AUDIO);
 
-    if (video.empty() || !PathFileExists(video.c_str())) {
+    if (video.empty() || !FileUtils::FileExists(video)) {
         ShowError(IDS_ERR_NO_VIDEO);
         return;
     }
-    if (audio.empty() || !PathFileExists(audio.c_str())) {
+    if (audio.empty() || !FileUtils::FileExists(audio)) {
         ShowError(IDS_ERR_NO_AUDIO);
         return;
     }
@@ -532,17 +535,12 @@ void MainWindow::OnReplaceAudio()
         return;
     }
 
-    std::wstring base = video;
-    const size_t slash = base.find_last_of(L"\\/");
-    const size_t dot = base.find_last_of(L'.');
-    if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
-        base.resize(dot);
-    }
+    std::wstring base = StringUtils::GetFileNameWithoutExtension(video);
     std::wstring out = BrowseSave(base + L"_music.mp4");
     if (out.empty()) return;
     
     if (ArePathsEqual(out, video) || ArePathsEqual(out, audio)) {
-        MessageBox(m_ui.hWnd, L"Le fichier de sortie doit être différent des fichiers source.",
+        Win32Utils::MessageBox(m_ui.hWnd, L"Le fichier de sortie doit être différent des fichiers source.",
             LoadString(IDS_ERR_TITLE).c_str(), MB_ICONWARNING);
         return;
     }
@@ -551,7 +549,7 @@ void MainWindow::OnReplaceAudio()
     EnableWindow(GetDlgItem(m_ui.hWnd, ID_BTN_GO), FALSE);
     
     wchar_t buf[256] = {};
-    swprintf_s(buf, LoadString(IDS_ENCODING).c_str(), 0, L"00:00:00");
+    swprintf_s(buf, LoadString(IDS_ENCODING).c_str(), 0, SecondsToHMS(0.0).c_str());
     SetDlgItemText(m_ui.hWnd, ID_STATIC_STATUS, buf);
     
     HWND hP = GetDlgItem(m_ui.hWnd, ID_PROGRESS);
@@ -621,7 +619,7 @@ void MainWindow::OnAudioShortModeChanged()
 void MainWindow::OnEncodeProgress(int pct, double etaSecs)
 {
     wchar_t buf[256] = {};
-    swprintf_s(buf, LoadString(IDS_ENCODING).c_str(), pct, SecondsToHMS(etaSecs).c_str());
+    swprintf_s(buf, LoadString(IDS_ENCODING).c_str(), pct, StringUtils::SecondsToHMS(etaSecs).c_str());
     SendDlgItemMessage(m_ui.hWnd, ID_PROGRESS, PBM_SETPOS, (WPARAM)pct, 0);
     SetDlgItemText(m_ui.hWnd, ID_STATIC_STATUS, buf);
     UpdateTaskbarProgress(pct);
@@ -636,12 +634,12 @@ void MainWindow::OnEncodeDone(ENCODE_DONE_MSG* encMsg)
     if (encMsg->ok) {
         UpdateTaskbarProgress(100);
         SetDlgItemText(m_ui.hWnd, ID_STATIC_STATUS, LoadString(IDS_DONE_STATUS).c_str());
-        MessageBox(m_ui.hWnd, LoadString(IDS_DONE_MSG).c_str(), 
+        Win32Utils::MessageBox(m_ui.hWnd, LoadString(IDS_DONE_MSG), 
             LoadString(IDS_DONE_TITLE).c_str(), MB_ICONINFORMATION);
     } else {
         SignalTaskbarError();
         SetDlgItemText(m_ui.hWnd, ID_STATIC_STATUS, LoadString(IDS_ERR_STATUS).c_str());
-        MessageBox(m_ui.hWnd, (LoadString(IDS_ERR_TITLE) + L":\n\n" + encMsg->error).c_str(),
+        Win32Utils::MessageBox(m_ui.hWnd, (LoadString(IDS_ERR_TITLE) + L":\n\n" + encMsg->error),
             LoadString(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
     }
     SignalTaskbarDone();
@@ -674,20 +672,12 @@ void MainWindow::OnDropFiles(HDROP hDrop)
         const UINT cch = DragQueryFile(hDrop, i, nullptr, 0);
         std::vector<wchar_t> buf(cch + 1, L'\0');
         DragQueryFile(hDrop, i, buf.data(), cch + 1);
-        std::wstring ext = buf.data();
-        size_t dot = ext.rfind(L'.');
-        if (dot != std::wstring::npos) ext = ext.substr(dot + 1);
-        for (auto& c : ext) c = towlower(c);
+        std::wstring path = buf.data();
         
-        bool isVideo = (ext == L"mp4" || ext == L"mov" || ext == L"avi" || 
-                        ext == L"mkv" || ext == L"m4v" || ext == L"wmv");
-        bool isAudio = (ext == L"mp3" || ext == L"wav" || ext == L"aac" || 
-                        ext == L"flac" || ext == L"ogg" || ext == L"m4a" || ext == L"wma");
-        
-        if (isVideo) {
-            ApplyVideoPath(buf.data());
-        } else if (isAudio) {
-            ApplyAudioPath(buf.data());
+        if (FileUtils::IsVideoFile(path)) {
+            ApplyVideoPath(path);
+        } else if (FileUtils::IsAudioFile(path)) {
+            ApplyAudioPath(path);
         }
     }
     DragFinish(hDrop);
@@ -771,58 +761,32 @@ HWND MainWindow::CreateComboBox(int id, int x, int y, int w, int h)
 
 std::wstring MainWindow::BrowseFile(bool isVideo)
 {
-    constexpr DWORD kDialogPathChars = 32768;
-    std::vector<wchar_t> buf(kDialogPathChars, L'\0');
-    OPENFILENAME ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = m_ui.hWnd;
-    ofn.lpstrFile = buf.data();
-    ofn.nMaxFile = kDialogPathChars;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    
     if (isVideo) {
-        ofn.lpstrFilter = L"Video\0*.mp4;*.mov;*.avi;*.mkv;*.m4v;*.wmv\0All\0*.*\0";
-        ofn.lpstrTitle = L"Video";
+        return FileUtils::BrowseVideoFile(m_ui.hWnd);
     } else {
-        ofn.lpstrFilter = L"Audio\0*.mp3;*.wav;*.aac;*.flac;*.ogg;*.m4a;*.wma\0All\0*.*\0";
-        ofn.lpstrTitle = L"Music";
+        return FileUtils::BrowseAudioFile(m_ui.hWnd);
     }
-    
-    return GetOpenFileName(&ofn) ? buf.data() : L"";
 }
 
 std::wstring MainWindow::BrowseSave(const std::wstring& defaultName)
 {
-    constexpr DWORD kDialogPathChars = 32768;
-    std::vector<wchar_t> buf(kDialogPathChars, L'\0');
-    wcsncpy_s(buf.data(), buf.size(), defaultName.c_str(), _TRUNCATE);
-    
-    OPENFILENAME ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = m_ui.hWnd;
-    ofn.lpstrFile = buf.data();
-    ofn.nMaxFile = kDialogPathChars;
-    ofn.lpstrFilter = L"MP4\0*.mp4\0All\0*.*\0";
-    ofn.lpstrDefExt = L"mp4";
-    ofn.lpstrTitle = L"Save as";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_EXPLORER;
-    
-    return GetSaveFileName(&ofn) ? buf.data() : L"";
+    return FileUtils::SaveFileDialog(m_ui.hWnd, defaultName, L"MP4\0*.mp4\0All\0*.*\0", L"mp4");
 }
 
 void MainWindow::ApplyVideoPath(const std::wstring& path)
 {
-    if (path.empty() || !PathFileExists(path.c_str())) return;
+    if (path.empty() || !FileUtils::FileExists(path)) return;
     
     m_ui.videoPath = path;
-    double dur = MF_GetDuration(path);
+    double dur = MediaUtils::GetMediaDuration(path);
     m_ui.videoDuration = dur;
     SetDlgItemText(m_ui.hWnd, ID_EDIT_VIDEO, path.c_str());
     
     if (dur > 0) {
-        SetDlgItemText(m_ui.hWnd, ID_EDIT_VID_END, SecondsToHMS(dur).c_str());
+        SetDlgItemText(m_ui.hWnd, ID_EDIT_VID_END, StringUtils::SecondsToHMS(dur).c_str());
         SetDlgItemText(m_ui.hWnd, ID_STATIC_VID_DUR,
-            FormatString2(IDS_DURATION_FMT, SecondsToHMS(dur).c_str(), PathFindFileName(path.c_str())).c_str());
+            FormatString2(IDS_DURATION_FMT, StringUtils::SecondsToHMS(dur).c_str(), 
+                          StringUtils::GetFileName(path).c_str()).c_str());
     } else {
         SetDlgItemText(m_ui.hWnd, ID_STATIC_VID_DUR, LoadString(IDS_DUR_UNAVAIL).c_str());
     }
@@ -830,23 +794,24 @@ void MainWindow::ApplyVideoPath(const std::wstring& path)
 
 void MainWindow::ApplyAudioPath(const std::wstring& path)
 {
-    if (path.empty() || !PathFileExists(path.c_str())) return;
+    if (path.empty() || !FileUtils::FileExists(path)) return;
     
     m_ui.audioPath = path;
     m_ui.audioStartSec = 0;
     m_ui.waveformReady = false;
     m_ui.waveform.clear();
-    double dur = MF_GetDuration(path);
+    double dur = MediaUtils::GetMediaDuration(path);
     m_ui.audioDuration = dur;
     m_ui.audioEndSec = (dur > 0) ? dur : 0;
     
     SetDlgItemText(m_ui.hWnd, ID_EDIT_AUDIO, path.c_str());
     SetDlgItemText(m_ui.hWnd, ID_EDIT_AUD_START, L"00:00:00");
-    SetDlgItemText(m_ui.hWnd, ID_EDIT_AUD_END, (dur > 0) ? SecondsToHMS(dur).c_str() : L"");
+    SetDlgItemText(m_ui.hWnd, ID_EDIT_AUD_END, (dur > 0) ? StringUtils::SecondsToHMS(dur).c_str() : L"");
     
     if (dur > 0) {
         SetDlgItemText(m_ui.hWnd, ID_STATIC_AUD_DUR,
-            FormatString2(IDS_DURATION_FMT, SecondsToHMS(dur).c_str(), PathFindFileName(path.c_str())).c_str());
+            FormatString2(IDS_DURATION_FMT, StringUtils::SecondsToHMS(dur).c_str(), 
+                          StringUtils::GetFileName(path).c_str()).c_str());
     }
     InvalidateRect(m_ui.hWaveWnd, nullptr, FALSE);
 
@@ -862,26 +827,15 @@ void MainWindow::ApplyAudioPath(const std::wstring& path)
 // Utility Functions
 // ===========================================================================
 
+// Utility functions - now using StringUtils
 std::wstring MainWindow::SecondsToHMS(double s)
 {
-    if (s < 0) s = 0;
-    int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sc = t % 60;
-    wchar_t b[32];
-    swprintf_s(b, L"%02d:%02d:%02d", h, m, sc);
-    return b;
+    return StringUtils::SecondsToHMS(s);
 }
 
 double MainWindow::HMSToSeconds(const std::wstring& t)
 {
-    int h = 0, m = 0;
-    double s = 0;
-    if (swscanf_s(t.c_str(), L"%d:%d:%lf", &h, &m, &s) >= 2) {
-        return h * 3600.0 + m * 60.0 + s;
-    }
-    if (swscanf_s(t.c_str(), L"%lf", &s) == 1) {
-        return s;
-    }
-    return -1.0;
+    return StringUtils::HMSToSeconds(t);
 }
 
 std::wstring MainWindow::GetControlText(HWND hWnd, int id)
@@ -896,7 +850,7 @@ std::wstring MainWindow::GetControlText(HWND hWnd, int id)
 
 void MainWindow::ShowError(UINT msgId, UINT titleId)
 {
-    MessageBox(m_ui.hWnd, LoadString(msgId).c_str(), LoadString(titleId).c_str(), MB_ICONWARNING);
+    Win32Utils::MessageBox(m_ui.hWnd, LoadString(msgId), LoadString(titleId), MB_ICONWARNING);
 }
 
 std::wstring MainWindow::LocalizeEncodeError(EncodeError err)
@@ -959,15 +913,10 @@ std::wstring MainWindow::LocalizeEncodeError(EncodeError err)
     }
 }
 
+// Use FileUtils for path comparison
 bool MainWindow::ArePathsEqual(const std::wstring& a, const std::wstring& b)
 {
-    wchar_t fullA[32768] = {}, fullB[32768] = {};
-    DWORD lenA = GetFullPathNameW(a.c_str(), (DWORD)std::size(fullA), fullA, nullptr);
-    DWORD lenB = GetFullPathNameW(b.c_str(), (DWORD)std::size(fullB), fullB, nullptr);
-    if (lenA == 0 || lenA >= std::size(fullA) || lenB == 0 || lenB >= std::size(fullB)) {
-        return false;
-    }
-    return CompareStringOrdinal(fullA, -1, fullB, -1, TRUE) == CSTR_EQUAL;
+    return FileUtils::ArePathsEqual(a, b);
 }
 
 std::wstring MainWindow::LoadString(UINT id)
@@ -981,15 +930,17 @@ std::wstring MainWindow::LoadString(UINT id)
 
 std::wstring MainWindow::FormatString(UINT id, int value)
 {
+    std::wstring format = LoadString(id);
     wchar_t buf[256] = {};
-    swprintf_s(buf, LoadString(id).c_str(), value);
+    swprintf_s(buf, format.c_str(), value);
     return buf;
 }
 
 std::wstring MainWindow::FormatString2(UINT id, const wchar_t* a, const wchar_t* b)
 {
+    std::wstring format = LoadString(id);
     wchar_t buf[512] = {};
-    swprintf_s(buf, LoadString(id).c_str(), a, b);
+    swprintf_s(buf, format.c_str(), a, b);
     return buf;
 }
 
