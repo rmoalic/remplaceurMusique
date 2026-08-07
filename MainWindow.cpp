@@ -197,16 +197,14 @@ LRESULT CALLBACK MainWindow::WaveformWindowProc(HWND hWnd, UINT msg, WPARAM wPar
             RECT rc;
             GetClientRect(hWnd, &rc);
             
-            HDC mem = CreateCompatibleDC(hdc);
-            HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-            HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
+            Win32Utils::DC memDC(CreateCompatibleDC(hdc));
+            Win32Utils::Bitmap memBitmap(CreateCompatibleBitmap(hdc, rc.right, rc.bottom));
+            HBITMAP old = (HBITMAP)SelectObject(memDC.Get(), memBitmap.Get());
             
-            DrawWaveform(hWnd, mem);
+            DrawWaveform(hWnd, memDC.Get());
             
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-            SelectObject(mem, old);
-            DeleteObject(bmp);
-            DeleteDC(mem);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC.Get(), 0, 0, SRCCOPY);
+            SelectObject(memDC.Get(), old);
             
             EndPaint(hWnd, &ps);
             return 0;
@@ -275,16 +273,12 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
 {
     // Initialize UI state
     m_ui.hWnd = hWnd;
-    m_ui.hBrushBg = CreateSolidBrush(kColorBg);
-    m_ui.hFontUI = CreateFont(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    m_ui.hFontBold = CreateFont(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    m_ui.hFontSm = CreateFont(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    m_ui.brushBg.Reset(Win32Utils::CreateSolidBrush(kColorBg));
+    m_ui.fontUI.Reset(Win32Utils::CreateFont(15, FW_NORMAL, false, false, L"Segoe UI"));
+    m_ui.fontBold.Reset(Win32Utils::CreateFont(15, FW_SEMIBOLD, false, false, L"Segoe UI"));
+    m_ui.fontSm.Reset(Win32Utils::CreateFont(12, FW_NORMAL, false, false, L"Segoe UI"));
     
-    HFONT hFT = CreateFont(18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    Win32Utils::Font titleFont(Win32Utils::CreateFont(18, FW_BOLD, false, false, L"Segoe UI"));
 
     // Initialize taskbar
     CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
@@ -299,7 +293,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
 
     // Title
     HWND hTit = CreateLabel(LoadString(IDS_APP_TITLE).c_str(), kMargin, y, CW, 24, true);
-    SendMessage(hTit, WM_SETFONT, (WPARAM)hFT, TRUE);
+    SendMessage(hTit, WM_SETFONT, (WPARAM)titleFont.Get(), TRUE);
     y += 28;
     CreateLabel(LoadString(IDS_DROP_HINT).c_str(), kMargin, y, CW, 18);
     y += 24;
@@ -316,7 +310,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
     CreateEdit(ID_EDIT_VID_END, L"__:__:__", kMargin + 190, y, 80, kRowHeight);
     CreateLabel(LoadString(IDS_CROP_HINT).c_str(), kMargin + 274, y + 4, 200, 18);
     y += kRowHeight + 4;
-    CreateStatic(ID_STATIC_VID_DUR, L"", kMargin, y, CW, 16, m_ui.hFontSm);
+    CreateStatic(ID_STATIC_VID_DUR, L"", kMargin, y, CW, 16, m_ui.fontSm.Get());
     y += 22;
 
     // Music section
@@ -349,7 +343,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
         SetWindowLongPtr(m_ui.hWaveWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
     }
     y += kWaveformHeight + 4;
-    CreateStatic(ID_STATIC_AUD_DUR, L"", kMargin, y, CW, 16, m_ui.hFontSm);
+    CreateStatic(ID_STATIC_AUD_DUR, L"", kMargin, y, CW, 16, m_ui.fontSm.Get());
     y += 22;
 
     // Volume slider
@@ -359,7 +353,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
         kMargin + 66, y, 220, kRowHeight, hWnd, (HMENU)(INT_PTR)ID_SLIDER_VOLUME, m_hInstance, nullptr);
     SendMessage(hSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
     SendMessage(hSlider, TBM_SETPOS, TRUE, s_volumePct);
-    CreateStatic(ID_STATIC_VOL, L"100 %", kMargin + 290, y + 3, 60, 18, m_ui.hFontSm);
+    CreateStatic(ID_STATIC_VOL, L"100 %", kMargin + 290, y + 3, 60, 18, m_ui.fontSm.Get());
     y += kRowHeight + 8;
 
     // Short audio behavior
@@ -381,7 +375,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
     SendMessage(hCQ, CB_SETCURSEL, (WPARAM)s_qualityIdx, 0);
     y += kRowHeight + 4;
     CreateStatic(ID_STATIC_QINFO, LoadString(PRESETS[s_qualityIdx].dscId).c_str(),
-        kMargin, y, CW, 16, m_ui.hFontSm);
+        kMargin, y, CW, 16, m_ui.fontSm.Get());
     y += 22;
 
     // Go button
@@ -398,7 +392,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
     SendMessage(hProg, PBM_SETPOS, 0, 0);
     ShowWindow(hProg, SW_HIDE);
     y += 20;
-    CreateStatic(ID_STATIC_STATUS, LoadString(IDS_READY).c_str(), kMargin, y, CW, 18, m_ui.hFontSm);
+    CreateStatic(ID_STATIC_STATUS, LoadString(IDS_READY).c_str(), kMargin, y, CW, 18, m_ui.fontSm.Get());
     y += 24;
 
     // Adjust window size
@@ -407,7 +401,7 @@ LRESULT MainWindow::OnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
     SetWindowPos(hWnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
         SWP_NOMOVE | SWP_NOZORDER);
 
-    DeleteObject(hFT);
+    // hFT is now managed by titleFont RAII wrapper - no manual cleanup needed
     
     return 0;
 }
@@ -420,10 +414,7 @@ void MainWindow::OnDestroy()
     }
     DragAcceptFiles(m_ui.hWnd, FALSE);
     m_ui.pTaskbar.Reset();
-    DeleteObject(m_ui.hFontUI);
-    DeleteObject(m_ui.hFontBold);
-    DeleteObject(m_ui.hFontSm);
-    DeleteObject(m_ui.hBrushBg);
+    // Fonts and brushes are now managed by RAII wrappers - automatic cleanup
     PostQuitMessage(0);
 }
 
@@ -697,14 +688,14 @@ LRESULT MainWindow::OnControlColor(HDC hdc)
 {
     SetBkColor(hdc, kColorBg);
     SetTextColor(hdc, kColorText);
-    return (LRESULT)m_ui.hBrushBg;
+    return (LRESULT)m_ui.brushBg.Get();
 }
 
 LRESULT MainWindow::OnEraseBackground(HDC hdc)
 {
     RECT rc;
     GetClientRect(m_ui.hWnd, &rc);
-    FillRect(hdc, &rc, m_ui.hBrushBg);
+    FillRect(hdc, &rc, m_ui.brushBg.Get());
     return 1;
 }
 
@@ -716,7 +707,7 @@ HWND MainWindow::CreateLabel(const wchar_t* text, int x, int y, int w, int h, bo
 {
     HWND h2 = CreateWindow(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
         x, y, w, h, m_ui.hWnd, nullptr, m_hInstance, nullptr);
-    SendMessage(h2, WM_SETFONT, (WPARAM)(bold ? m_ui.hFontBold : m_ui.hFontUI), TRUE);
+    SendMessage(h2, WM_SETFONT, (WPARAM)(bold ? m_ui.fontBold.Get() : m_ui.fontUI.Get()), TRUE);
     return h2;
 }
 
@@ -725,7 +716,7 @@ HWND MainWindow::CreateEdit(int id, const wchar_t* text, int x, int y, int w, in
     HWND h2 = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", text,
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
         x, y, w, h, m_ui.hWnd, (HMENU)(INT_PTR)id, m_hInstance, nullptr);
-    SendMessage(h2, WM_SETFONT, (WPARAM)m_ui.hFontUI, TRUE);
+    SendMessage(h2, WM_SETFONT, (WPARAM)m_ui.fontUI.Get(), TRUE);
     return h2;
 }
 
@@ -734,7 +725,7 @@ HWND MainWindow::CreateButton(int id, const wchar_t* text, int x, int y, int w, 
     HWND h2 = CreateWindow(L"BUTTON", text,
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | (isDefault ? BS_DEFPUSHBUTTON : 0),
         x, y, w, h, m_ui.hWnd, (HMENU)(INT_PTR)id, m_hInstance, nullptr);
-    SendMessage(h2, WM_SETFONT, (WPARAM)(isDefault ? m_ui.hFontBold : m_ui.hFontUI), TRUE);
+    SendMessage(h2, WM_SETFONT, (WPARAM)(isDefault ? m_ui.fontBold.Get() : m_ui.fontUI.Get()), TRUE);
     return h2;
 }
 
@@ -742,7 +733,7 @@ HWND MainWindow::CreateStatic(int id, const wchar_t* text, int x, int y, int w, 
 {
     HWND h2 = CreateWindow(L"STATIC", text, WS_CHILD | WS_VISIBLE,
         x, y, w, h, m_ui.hWnd, (HMENU)(INT_PTR)id, m_hInstance, nullptr);
-    SendMessage(h2, WM_SETFONT, (WPARAM)(hFont ? hFont : m_ui.hFontUI), TRUE);
+    SendMessage(h2, WM_SETFONT, (WPARAM)(hFont ? hFont : m_ui.fontUI.Get()), TRUE);
     return h2;
 }
 
@@ -751,7 +742,7 @@ HWND MainWindow::CreateComboBox(int id, int x, int y, int w, int h)
     HWND h2 = CreateWindow(WC_COMBOBOX, L"",
         WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
         x, y, w, h, m_ui.hWnd, (HMENU)(INT_PTR)id, m_hInstance, nullptr);
-    SendMessage(h2, WM_SETFONT, (WPARAM)m_ui.hFontUI, TRUE);
+    SendMessage(h2, WM_SETFONT, (WPARAM)m_ui.fontUI.Get(), TRUE);
     return h2;
 }
 
@@ -973,21 +964,18 @@ void MainWindow::DrawWaveform(HWND hWnd, HDC hdc)
     GetClientRect(hWnd, &rc);
     int W = rc.right, H = rc.bottom, mid = H / 2, maxAmp = mid - 4;
 
-    HBRUSH hBg = CreateSolidBrush(kColorWaveBg);
-    FillRect(hdc, &rc, hBg);
-    DeleteObject(hBg);
+    Win32Utils::Brush bgBrush(Win32Utils::CreateSolidBrush(kColorWaveBg));
+    FillRect(hdc, &rc, bgBrush.Get());
 
     if (m_ui.waveform.empty()) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(80, 80, 120));
-        HFONT hf = CreateFont(13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        HFONT of = (HFONT)SelectObject(hdc, hf);
+        Win32Utils::Font msgFont(Win32Utils::CreateFont(13, FW_NORMAL, false, false, L"Segoe UI"));
+        HFONT of = (HFONT)SelectObject(hdc, msgFont.Get());
         std::wstring txt = m_ui.audioPath.empty() ? LoadString(IDS_WAVE_LOAD)
             : (m_ui.waveformReady ? LoadString(IDS_WAVE_UNAVAIL) : LoadString(IDS_WAVE_ANALYZING));
         DrawText(hdc, txt.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, of);
-        DeleteObject(hf);
         return;
     }
 
@@ -997,15 +985,13 @@ void MainWindow::DrawWaveform(HWND hWnd, HDC hdc)
 
     if (cxS > 0) {
         RECT z = { 0, 0, cxS, H };
-        HBRUSH h = CreateSolidBrush(kColorZone);
-        FillRect(hdc, &z, h);
-        DeleteObject(h);
+        Win32Utils::Brush zoneBrush(Win32Utils::CreateSolidBrush(kColorZone));
+        FillRect(hdc, &z, zoneBrush.Get());
     }
     if (cxE > cxS) {
         RECT z = { cxS, 0, cxE, H };
-        HBRUSH h = CreateSolidBrush(kColorZoneSelected);
-        FillRect(hdc, &z, h);
-        DeleteObject(h);
+        Win32Utils::Brush zoneSelectedBrush(Win32Utils::CreateSolidBrush(kColorZoneSelected));
+        FillRect(hdc, &z, zoneSelectedBrush.Get());
     }
 
     int nb = (int)m_ui.waveform.size();
@@ -1016,39 +1002,35 @@ void MainWindow::DrawWaveform(HWND hWnd, HDC hdc)
         int amp = (int)(v * maxAmp);
         int r = std::min(255, 84 + (int)(v * 50));
         int gv = std::min(255, 104 + (int)(v * 70));
-        HPEN hp = CreatePen(PS_SOLID, std::max(1, x2 - x - 1), RGB(r, gv, 255));
-        HPEN op = (HPEN)SelectObject(hdc, hp);
+        Win32Utils::Pen waveformPen(Win32Utils::CreatePen(PS_SOLID, std::max(1, x2 - x - 1), RGB(r, gv, 255)));
+        HPEN op = (HPEN)SelectObject(hdc, waveformPen.Get());
         MoveToEx(hdc, x, mid - amp, nullptr);
         LineTo(hdc, x, mid + amp + 1);
         SelectObject(hdc, op);
-        DeleteObject(hp);
     }
 
-    HPEN hc = CreatePen(PS_DOT, 1, RGB(60, 60, 90));
-    HPEN oc = (HPEN)SelectObject(hdc, hc);
+    Win32Utils::Pen centerPen(Win32Utils::CreatePen(PS_DOT, 1, RGB(60, 60, 90)));
+    HPEN oc = (HPEN)SelectObject(hdc, centerPen.Get());
     MoveToEx(hdc, 0, mid, nullptr);
     LineTo(hdc, W, mid);
     SelectObject(hdc, oc);
-    DeleteObject(hc);
 
     auto DrawCursor = [&](int cx, COLORREF col, bool top) {
-        HPEN hp = CreatePen(PS_SOLID, 2, col);
-        HPEN op = (HPEN)SelectObject(hdc, hp);
+        Win32Utils::Pen cursorPen(Win32Utils::CreatePen(PS_SOLID, 2, col));
+        HPEN op = (HPEN)SelectObject(hdc, cursorPen.Get());
         MoveToEx(hdc, cx, 0, nullptr);
         LineTo(hdc, cx, H);
         SelectObject(hdc, op);
-        DeleteObject(hp);
         POINT tri[3];
         if (top) tri[0] = { cx - 5,0 }, tri[1] = { cx + 5,0 }, tri[2] = { cx,9 };
         else     tri[0] = { cx - 5,H }, tri[1] = { cx + 5,H }, tri[2] = { cx,H - 9 };
-        HBRUSH hb = CreateSolidBrush(col);
+        Win32Utils::Brush cursorBrush(Win32Utils::CreateSolidBrush(col));
         HPEN   hn = (HPEN)GetStockObject(NULL_PEN);
         HPEN   op2 = (HPEN)SelectObject(hdc, hn);
-        HBRUSH ob = (HBRUSH)SelectObject(hdc, hb);
+        HBRUSH ob = (HBRUSH)SelectObject(hdc, cursorBrush.Get());
         Polygon(hdc, tri, 3);
         SelectObject(hdc, op2);
         SelectObject(hdc, ob);
-        DeleteObject(hb);
     };
     
     DrawCursor(cxS, kColorCursorStart, true);
@@ -1060,12 +1042,10 @@ void MainWindow::DrawWaveform(HWND hWnd, HDC hdc)
             + L" / " + SecondsToHMS(dur);
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(150, 150, 180));
-        HFONT hf = CreateFont(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        HFONT of = (HFONT)SelectObject(hdc, hf);
+        Win32Utils::Font labelFont(Win32Utils::CreateFont(12, FW_NORMAL, false, false, L"Segoe UI"));
+        HFONT of = (HFONT)SelectObject(hdc, labelFont.Get());
         RECT lr = { 0, H - 16, W - 4, H };
         DrawText(hdc, lbl.c_str(), -1, &lr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, of);
-        DeleteObject(hf);
     }
 }

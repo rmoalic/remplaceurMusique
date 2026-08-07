@@ -25,6 +25,7 @@
 #include "Encode.hpp"
 #include "EncodeJob.hpp"
 #include "WaveformExtractorJob.hpp"
+#include "Win32Utils.hpp"
 
 using Microsoft::WRL::ComPtr;
 
@@ -85,10 +86,10 @@ private:
     {
         HWND hWnd = nullptr;
         HWND hWaveWnd = nullptr;
-        HFONT hFontUI = nullptr;
-        HFONT hFontBold = nullptr;
-        HFONT hFontSm = nullptr;
-        HBRUSH hBrushBg = nullptr;
+        Win32Utils::Font fontUI;
+        Win32Utils::Font fontBold;
+        Win32Utils::Font fontSm;
+        Win32Utils::Brush brushBg;
         ComPtr<ITaskbarList3> pTaskbar;
 
         // Sélection de fichiers
