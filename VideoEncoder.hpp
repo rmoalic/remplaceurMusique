@@ -13,6 +13,9 @@
 
 using Microsoft::WRL::ComPtr;
 
+// Utility function to get media duration
+double MF_GetDuration(const std::wstring& path);
+
 
 
 struct Hns

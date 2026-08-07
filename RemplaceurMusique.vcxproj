@@ -73,6 +73,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="EncodeJob.cpp" />
+    <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="VideoEncoder.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="WaveformExtractor.cpp" />
@@ -81,6 +82,7 @@
   <ItemGroup>
     <ClInclude Include="Encode.hpp" />
     <ClInclude Include="EncodeJob.hpp" />
+    <ClInclude Include="MainWindow.hpp" />
     <ClInclude Include="resource.hpp" />
     <ClInclude Include="VideoEncoder.hpp" />
     <ClInclude Include="WaveformExtractor.hpp" />
