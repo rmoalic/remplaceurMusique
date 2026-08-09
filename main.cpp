@@ -8,36 +8,25 @@
 
 #include <windows.h>
 #include <windowsx.h>
-#include <commctrl.h>
-#include <commdlg.h>
-#include <shellapi.h>
-#include <shobjidl.h>
 #include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
-#include <mferror.h>
-#include <mftransform.h>
-#include <mfobjects.h>
-#include <propvarutil.h>
 #include <shlwapi.h>
-#include <codecapi.h>
 #include <wrl/client.h>   // ComPtr
 #include "resource.hpp"
 #include "Encode.hpp"
 
 #include <string>
 #include <vector>
-#include <thread>
 #include <atomic>
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <memory>
-#include <cstring>
 #include <iterator>
 #include "VideoEncoder.hpp"
 #include "EncodeJob.hpp"
 #include "WaveformExtractorJob.hpp"
+#include <ShObjIdl.h>
+#include <commdlg.h>
+#include <shellapi.h>
 
 using Microsoft::WRL::ComPtr;
 double MF_GetDuration(const std::wstring& path);
