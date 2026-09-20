@@ -683,8 +683,12 @@ FrameResult VideoEncoder::ProcessVideoFrame(EncodeLoop& loop, IMFSinkWriter* wri
     }
     loop.vidLastTs = rel;
 
-    if (m_vcfg.maxDurHns.value != LLONG_MAX && rel - loop.lastProgressHns > 5000000LL)
-        ReportProgress(loop, rel, m_vcfg.maxDurHns.value);
+    // Base progress on the computed output duration (source length minus
+    // seek), not only on the user trim, so progress is reported even when
+    // no explicit video end is set.
+    if (m_outputDurHns.value > 0 && m_outputDurHns.value != LLONG_MAX &&
+            rel - loop.lastProgressHns > 5000000LL)
+        ReportProgress(loop, rel, m_outputDurHns.value);
 
     return FrameResult::Continue;
 }
@@ -733,10 +737,17 @@ bool VideoEncoder::ProcessAudio(EncodeLoop& loop, IMFSinkWriter* writer, DWORD a
         }
         const bool eof = flags & MF_SOURCE_READERF_ENDOFSTREAM;
 
-        if (!pS && !eof) continue;
+        if (!pS && !eof) {
+            // Reader stuck returning null samples without EOF (gap, DRM):
+            // treat a long streak as EOF so the loop/silence policy takes
+            // over instead of spinning until the video ends.
+            if (++loop.audNullStreak > 200) loop.audEOF = true;
+            else continue;
+        }
 
-        if (!eof)
+        if (pS && !eof)
         {
+            loop.audNullStreak = 0;
             LONGLONG dur = 0;
             if (FAILED(pS->GetSampleDuration(&dur)) || dur <= 0) dur = 200000LL;
 

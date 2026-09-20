@@ -163,6 +163,7 @@ struct EncodeLoop
     LONGLONG audWritten = 0;
     LONGLONG audPosInRange = 0;
     bool     audEOF = false;
+    int      audNullStreak = 0;
 
     // Progress / ETA
     LONGLONG     lastProgressHns = 0;

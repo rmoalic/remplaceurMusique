@@ -19,10 +19,12 @@ void EncodeJob::run(std::stop_token stopToken, uint64_t /*generation*/)
     auto cancelFlag = std::make_shared<std::atomic_bool>(false);
     std::stop_callback stopCb(stopToken, [cancelFlag]() { cancelFlag->store(true); });
 
-    auto params = std::move(m_params);
-    auto callbacks = std::move(m_callbacks);
+    if (!m_params) return;
 
-    if (!params) return;
+    // Copier (plutôt que déplacer) pour qu'un Start() répété ne vide pas
+    // le job et ne s'exécute pas silencieusement avec des paramètres nuls.
+    auto params = std::make_unique<EncodeParams>(*m_params);
+    auto callbacks = m_callbacks;
 
     auto encoder = VideoEncoder::Create(std::move(params), cancelFlag, std::move(callbacks));
     if (encoder) {

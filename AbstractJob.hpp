@@ -22,6 +22,12 @@ public:
         if (m_running.load(std::memory_order_acquire))
             return;
 
+        // Rejoindre le thread précédent avant de réassigner m_thread :
+        // détruire un std::jthread joignable sans join() appelle std::terminate.
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+
         ++m_generation;
         m_finished.store(false, std::memory_order_release);
         m_stopRequested.store(false, std::memory_order_release);
