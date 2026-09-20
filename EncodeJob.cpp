@@ -1,52 +1,31 @@
 #include "EncodeJob.hpp"
 #include "VideoEncoder.hpp"
-#include "Encode.hpp"   // EncodeParams
+#include "Encode.hpp" // EncodeParams
+#include <stop_token>
 
-EncodeJob::EncodeJob()
-    : m_cancelRequested(std::make_shared<std::atomic_bool>(false))
+EncodeJob::EncodeJob(std::unique_ptr<EncodeParams> params, EncodeCallbacks callbacks)
+    : m_params(std::move(params)), m_callbacks(std::move(callbacks))
 {
 }
 
 EncodeJob::~EncodeJob()
 {
+    RequestStop();
     Join();
 }
 
-std::unique_ptr<EncodeJob> EncodeJob::Start(
-    std::unique_ptr<EncodeParams> params, EncodeCallbacks callbacks)
+void EncodeJob::run(std::stop_token stopToken, uint64_t /*generation*/)
 {
-    auto job = std::unique_ptr<EncodeJob>(new EncodeJob());
-    auto cancelFlag = job->m_cancelRequested;
-    auto* finishedFlag = &job->m_finished;
+    auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    std::stop_callback stopCb(stopToken, [cancelFlag]() { cancelFlag->store(true); });
 
-    job->m_thread = std::thread(
-                        [p = std::move(params), cancelFlag, finishedFlag, cb = std::move(callbacks)]() mutable
-    {
-        auto encoder = VideoEncoder::Create(std::move(p), cancelFlag, std::move(cb));
-        if (encoder) encoder->Run();
-        finishedFlag->store(true);
-    });
+    auto params = std::move(m_params);
+    auto callbacks = std::move(m_callbacks);
 
-    return job;
-}
+    if (!params) return;
 
-void EncodeJob::RequestCancel()
-{
-    m_cancelRequested->store(true);
-}
-
-bool EncodeJob::CancelRequested() const
-{
-    return m_cancelRequested->load();
-}
-
-bool EncodeJob::IsFinished() const
-{
-    return m_finished.load();
-}
-
-void EncodeJob::Join()
-{
-    if (m_thread.joinable())
-        m_thread.join();
+    auto encoder = VideoEncoder::Create(std::move(params), cancelFlag, std::move(callbacks));
+    if (encoder) {
+        encoder->Run();
+    }
 }

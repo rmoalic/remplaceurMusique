@@ -1,32 +1,31 @@
 #pragma once
+#include "AbstractJob.hpp"
 #include <string>
 #include <vector>
-#include <thread>
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include "WaveformExtractor.hpp"
 
-class WaveformExtractorJob
+class WaveformExtractorJob : public AbstractJob
 {
 public:
     using ReadyCallback = std::function<void(uint64_t generation, std::vector<float> values)>;
 
     explicit WaveformExtractorJob(int sampleCount = 700, int sampleRateHz = 8000);
-    ~WaveformExtractorJob();
+    ~WaveformExtractorJob() override;
 
-    uint64_t Start(std::wstring path, double durationSecs, ReadyCallback onReady);
-    uint64_t CurrentGeneration() const {
-        return m_generation.load();
-    }
-    void RequestStop();
-    void Join();
+    // Prépare la prochaine exécution (doit être appelé avant Start())
+    void SetInput(std::wstring path, double durationSecs, ReadyCallback onReady);
+
+protected:
+    void run(std::stop_token stopToken, uint64_t generation) override;
 
 private:
-    void RunOnThread(std::wstring path, uint64_t generation, double durationSecs, ReadyCallback onReady);
-
     WaveformExtractor m_extractor;
-    std::atomic<uint64_t> m_generation{ 0 };
-    std::atomic<bool> m_stopRequested{ false };
-    std::vector<std::thread> m_threads;
+
+    // paramètres de la prochaine exécution (protégés par mutex)
+    std::wstring m_path;
+    double m_durationSecs{ 0.0 };
+    ReadyCallback m_onReady;
+    std::mutex m_inputMutex;
 };

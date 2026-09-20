@@ -1,8 +1,9 @@
 #include "WaveformExtractorJob.hpp"
 
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>   // CoInitializeEx/CoUninitialize only
-#include <objbase.h>   // définit CoInitializeEx, CoUninitialize, COINIT_* constantes
+#include <windows.h>   // CoInitializeEx/CoUninitialize
+#include <objbase.h>
+#include <stop_token>
 
 WaveformExtractorJob::WaveformExtractorJob(int sampleCount, int sampleRateHz)
     : m_extractor(sampleCount, sampleRateHz)
@@ -15,48 +16,42 @@ WaveformExtractorJob::~WaveformExtractorJob()
     Join();
 }
 
-uint64_t WaveformExtractorJob::Start(std::wstring path, double durationSecs, ReadyCallback onReady)
+void WaveformExtractorJob::SetInput(std::wstring path, double durationSecs, ReadyCallback onReady)
 {
-    const uint64_t generation = ++m_generation;
-    m_threads.emplace_back(
-    [this, p = std::move(path), generation, durationSecs, cb = std::move(onReady)]() mutable {
-        const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (FAILED(coHr)) return;
-        RunOnThread(std::move(p), generation, durationSecs, std::move(cb));
-        CoUninitialize();
-    });
-    return generation;
+    std::lock_guard<std::mutex> lk(m_inputMutex);
+    m_path = std::move(path);
+    m_durationSecs = durationSecs;
+    m_onReady = std::move(onReady);
 }
 
-void WaveformExtractorJob::RequestStop()
+void WaveformExtractorJob::run(std::stop_token stopToken, uint64_t generation)
 {
-    m_stopRequested = true;
-}
+    // Capture des paramètres au début de l'exécution
+    std::wstring path;
+    double durationSecs;
+    ReadyCallback onReady;
+    {
+        std::lock_guard<std::mutex> lk(m_inputMutex);
+        path = m_path;
+        durationSecs = m_durationSecs;
+        onReady = m_onReady;
+    }
 
-void WaveformExtractorJob::Join()
-{
-    for (auto& t : m_threads)
-        if (t.joinable()) t.join();
-    m_threads.clear();
-}
+    if (path.empty()) return;
 
-void WaveformExtractorJob::RunOnThread(
-    std::wstring path, uint64_t generation, double durationSecs, ReadyCallback onReady)
-{
-    // Checked both inside WaveformExtractor::Extract (to abort mid-decode)
-    // and again here after it returns (to avoid firing the callback for a
-    // request that was superseded/shut down while Extract() was finishing
-    // its last buffer).
-    auto shouldStop = [this, generation] {
-        return m_stopRequested.load() || generation != m_generation.load();
+    const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(coHr)) return;
+
+    // Predicate utilisé par WaveformExtractor::Extract
+    auto shouldStop = [this, generation, &stopToken]() -> bool {
+        return StopRequested() || stopToken.stop_requested() || (generation != CurrentGeneration());
     };
-
-    if (shouldStop()) return;
 
     std::vector<float> values = m_extractor.Extract(path, durationSecs, shouldStop);
 
-    if (shouldStop()) return;
-
-    if (onReady)
+    if (!shouldStop() && onReady) {
         onReady(generation, std::move(values));
+    }
+
+    CoUninitialize();
 }

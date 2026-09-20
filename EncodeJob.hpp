@@ -1,35 +1,20 @@
 #pragma once
+#include "AbstractJob.hpp"
 #include <memory>
-#include <thread>
 #include <atomic>
-#include "VideoEncoder.hpp"   // EncodeCallbacks
-
+#include "VideoEncoder.hpp"
 struct EncodeParams;
 
-
-class EncodeJob
+class EncodeJob : public AbstractJob
 {
 public:
-    static std::unique_ptr<EncodeJob> Start(
-        std::unique_ptr<EncodeParams> params, EncodeCallbacks callbacks);
+    EncodeJob(std::unique_ptr<EncodeParams> params, EncodeCallbacks callbacks);
+    ~EncodeJob() override;
 
-    void RequestCancel();
-
-    bool CancelRequested() const;
-
-    bool IsFinished() const;
-
-    void Join();
-
-    ~EncodeJob();
-
-    EncodeJob(const EncodeJob&) = delete;
-    EncodeJob& operator=(const EncodeJob&) = delete;
+protected:
+    void run(std::stop_token stopToken, uint64_t generation) override;
 
 private:
-    EncodeJob();
-
-    std::shared_ptr<std::atomic_bool> m_cancelRequested;
-    std::atomic_bool m_finished{ false };
-    std::thread m_thread;
+    std::unique_ptr<EncodeParams> m_params;
+    EncodeCallbacks m_callbacks;
 };

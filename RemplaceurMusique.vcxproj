@@ -40,8 +40,9 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
       <WarningLevel>Level3</WarningLevel>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <ExceptionHandling Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExceptionHandling>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -59,7 +60,7 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <Optimization>Disabled</Optimization>
       <WarningLevel>Level4</WarningLevel>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <ExceptionHandling Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExceptionHandling>
     </ClCompile>
@@ -72,6 +73,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="AbstractJob.hpp" />
     <ClCompile Include="EncodeJob.cpp" />
     <ClCompile Include="VideoEncoder.cpp" />
     <ClCompile Include="main.cpp" />
@@ -81,6 +83,7 @@
   <ItemGroup>
     <ClInclude Include="Encode.hpp" />
     <ClInclude Include="EncodeJob.hpp" />
+    <ClInclude Include="IJob.hpp" />
     <ClInclude Include="resource.hpp" />
     <ClInclude Include="VideoEncoder.hpp" />
     <ClInclude Include="WaveformExtractor.hpp" />

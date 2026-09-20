@@ -151,8 +151,7 @@ static UIState ui;
 
 std::atomic<bool> encoding{ false };
 static std::unique_ptr<EncodeJob> g_encodeJob;
-static WaveformExtractorJob g_waveform(WAVE_SAMPLES);
-
+static std::unique_ptr<WaveformExtractorJob> g_waveform;
 struct WaveformResult
 {
     uint64_t generation;
@@ -538,11 +537,14 @@ static void ApplyAudioPath(HWND hWnd, const std::wstring& p)
                        Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
     InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
 
-    g_waveform.Start(p, dur, [hWnd](uint64_t generation, std::vector<float> values) {
+    g_waveform = std::make_unique<WaveformExtractorJob>(WAVE_SAMPLES);
+    g_waveform->SetInput(p, dur, [hWnd](uint64_t generation, std::vector<float> values) {
         auto* result = values.empty() ? nullptr : new WaveformResult{ generation, std::move(values) };
         if (!PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, (LPARAM)result))
             delete result;
     });
+
+    g_waveform->Start();
 }
 
 // ---------------------------------------------------------------------------
@@ -873,7 +875,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 ENCODE_DONE_MSG doneMsg{ ok, LocalizeEncodeError(error.code) };
                 SendMessage(hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
             };
-            g_encodeJob = EncodeJob::Start(std::move(ep), std::move(callbacks));
+            g_encodeJob = std::make_unique<EncodeJob>(std::move(ep), std::move(callbacks));
+            g_encodeJob->Start();
         }
         break;
     }
@@ -913,7 +916,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Ignore results from a request that's been superseded by a newer
         // Start() call (e.g. the user picked a different audio file while
         // extraction was still running).
-        if ((uint64_t)wParam != g_waveform.CurrentGeneration())
+        if ((uint64_t)wParam != g_waveform->CurrentGeneration())
             break;
 
         if (auto* result = (WaveformResult*)lParam) {
@@ -926,8 +929,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_DESTROY:
-        g_waveform.RequestStop();
-        if (g_encodeJob) g_encodeJob->RequestCancel();
+        g_waveform->RequestStop();
+        if (g_encodeJob) g_encodeJob->RequestStop();
         DragAcceptFiles(hWnd, FALSE);
         ui.pTaskbar.Reset();
         DeleteObject(ui.hFontUI);
@@ -989,8 +992,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    if (g_encodeJob) g_encodeJob->RequestCancel();
-    g_waveform.Join();
+    if (g_encodeJob) g_encodeJob->RequestStop();
+    g_waveform->Join();
     MFShutdown();
     CoUninitialize();
     return (int)msg.wParam;
