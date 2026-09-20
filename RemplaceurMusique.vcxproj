@@ -75,6 +75,7 @@
   <ItemGroup>
     <ClCompile Include="AbstractJob.hpp" />
     <ClCompile Include="EncodeJob.cpp" />
+    <ClCompile Include="MainViewModel.cpp" />
     <ClCompile Include="VideoEncoder.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="WaveformExtractor.cpp" />
@@ -84,6 +85,7 @@
     <ClInclude Include="Encode.hpp" />
     <ClInclude Include="EncodeJob.hpp" />
     <ClInclude Include="IJob.hpp" />
+    <ClInclude Include="MainViewModel.hpp" />
     <ClInclude Include="resource.hpp" />
     <ClInclude Include="VideoEncoder.hpp" />
     <ClInclude Include="WaveformExtractor.hpp" />

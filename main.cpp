@@ -13,6 +13,7 @@
 #include <wrl/client.h>   // ComPtr
 #include "resource.hpp"
 #include "Encode.hpp"
+#include "MainViewModel.hpp"
 
 #include <string>
 #include <vector>
@@ -148,15 +149,10 @@ struct UIState {
     bool waveformReady = false;
 };
 static UIState ui;
-
+static std::shared_ptr<MainViewModel> g_vm;
 std::atomic<bool> encoding{ false };
 static std::unique_ptr<EncodeJob> g_encodeJob;
 static std::unique_ptr<WaveformExtractorJob> g_waveform;
-struct WaveformResult
-{
-    uint64_t generation;
-    std::vector<float> values;
-};
 
 // ---------------------------------------------------------------------------
 // ITaskbarList3 helpers
@@ -534,19 +530,14 @@ static void ApplyAudioPath(HWND hWnd, const std::wstring& p)
     SetDlgItemText(hWnd, ID_EDIT_AUD_END, (dur > 0) ? SecsToHMS(dur).c_str() : L"");
     if (dur > 0)
         SetDlgItemText(hWnd, ID_STATIC_AUD_DUR,
-                       Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
+            Sfmt2(IDS_DURATION_FMT, SecsToHMS(dur).c_str(), PathFindFileName(p.c_str())).c_str());
     InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
 
-    g_waveform = std::make_unique<WaveformExtractorJob>(WAVE_SAMPLES);
-    g_waveform->SetInput(p, dur, [hWnd](uint64_t generation, std::vector<float> values) {
-        auto* result = values.empty() ? nullptr : new WaveformResult{ generation, std::move(values) };
-        if (!PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, (LPARAM)result))
-            delete result;
-    });
-
-    g_waveform->Start();
+    // MVVM : mettre à jour le ViewModel et démarrer l'extraction asynchrone
+    if (!g_vm) g_vm = std::make_shared<MainViewModel>(WAVE_SAMPLES);
+    g_vm->SetAudioPath(p);
+    g_vm->StartWaveformExtraction(dur);
 }
-
 // ---------------------------------------------------------------------------
 // Control factory helpers
 // ---------------------------------------------------------------------------
@@ -598,6 +589,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_CREATE: {
         ui.hWnd = hWnd;
         ui.hBrushBg = CreateSolidBrush(CLR_BG);
+        g_vm->SetOnGenerationReady([hWnd](uint64_t generation) {
+            // appelé depuis le worker thread du ViewModel : on poste juste l'id vers la UI thread
+            PostMessage(hWnd, WM_WAVEFORM_READY, (WPARAM)generation, 0);
+        });
+        g_vm->SetOnEncodeProgress([hWnd](int pct, double etaSecs) {
+            // appelé depuis worker thread : poster vers la UI thread
+            PostMessage(hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, (LPARAM)(LONGLONG)etaSecs);
+        });
+        g_vm->SetOnEncodeDone([hWnd](bool ok, EncodeErrorInfo error) {
+            // allouer un message sur le tas ; la UI le libèrera après usage
+            ENCODE_DONE_MSG* msg = new ENCODE_DONE_MSG{ ok, LocalizeEncodeError(error.code) };
+            PostMessage(hWnd, WM_ENCODE_DONE, (WPARAM)msg, 0);
+        });
         ui.hFontUI = CreateFont(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         ui.hFontBold = CreateFont(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
@@ -867,16 +871,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_qualityIdx, g_volumePct / 100.0f, hWnd
             });
 
-            EncodeCallbacks callbacks;
-            callbacks.onProgress = [hWnd](int pct, double etaSecs) {
-                PostMessage(hWnd, WM_ENCODE_PROGRESS, (WPARAM)pct, (LPARAM)(LONGLONG)etaSecs);
-            };
-            callbacks.onDone = [hWnd](bool ok, EncodeErrorInfo error) {
-                ENCODE_DONE_MSG doneMsg{ ok, LocalizeEncodeError(error.code) };
-                SendMessage(hWnd, WM_ENCODE_DONE, (WPARAM)&doneMsg, 0);
-            };
-            g_encodeJob = std::make_unique<EncodeJob>(std::move(ep), std::move(callbacks));
-            g_encodeJob->Start();
+            // déléguer au ViewModel
+            if (g_vm) {
+                g_vm->StartEncode(std::move(ep));
+            }
         }
         break;
     }
@@ -897,40 +895,38 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         EnableWindow(GetDlgItem(hWnd, ID_BTN_GO), TRUE);
         ShowWindow(GetDlgItem(hWnd, ID_PROGRESS), SW_HIDE);
         ENCODE_DONE_MSG* encMsg = (ENCODE_DONE_MSG*)wParam;
-        if (encMsg->ok) {
-            TBProgress(100);
-            SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_DONE_STATUS).c_str());
-            MessageBox(hWnd, S(IDS_DONE_MSG).c_str(), S(IDS_DONE_TITLE).c_str(), MB_ICONINFORMATION);
-        }
-        else {
-            TBError();
-            SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_ERR_STATUS).c_str());
-            MessageBox(hWnd, (S(IDS_ERR_TITLE) + L":\n\n" + encMsg->error).c_str(),
-                       S(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
+        if (encMsg) {
+            if (encMsg->ok) {
+                TBProgress(100);
+                SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_DONE_STATUS).c_str());
+                MessageBox(hWnd, S(IDS_DONE_MSG).c_str(), S(IDS_DONE_TITLE).c_str(), MB_ICONINFORMATION);
+            }
+            else {
+                TBError();
+                SetDlgItemText(hWnd, ID_STATIC_STATUS, S(IDS_ERR_STATUS).c_str());
+                MessageBox(hWnd, (S(IDS_ERR_TITLE) + L":\n\n" + encMsg->error).c_str(),
+                           S(IDS_ERR_TITLE).c_str(), MB_ICONERROR);
+            }
+            delete encMsg; // libération
         }
         TBDone();
         break;
     }
 
     case WM_WAVEFORM_READY: {
-        // Ignore results from a request that's been superseded by a newer
-        // Start() call (e.g. the user picked a different audio file while
-        // extraction was still running).
-        if ((uint64_t)wParam != g_waveform->CurrentGeneration())
-            break;
-
-        if (auto* result = (WaveformResult*)lParam) {
-            ui.waveform = std::move(result->values);
-            delete result;
-        }
-        ui.waveformReady = true;
-        InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
-        break;
+        uint64_t gen = (uint64_t)wParam;
+        if (g_vm) {
+            if (auto res = g_vm->ConsumeWaveform(gen)) {
+                ui.waveform = std::move(res->values);
+                ui.waveformReady = true;
+                InvalidateRect(ui.hWaveWnd, nullptr, FALSE);
+            }
+        } break;
     }
 
     case WM_DESTROY:
-        g_waveform->RequestStop();
-        if (g_encodeJob) g_encodeJob->RequestStop();
+        // arrêter les opérations en cours via le ViewModel
+        if (g_vm) g_vm->CancelEncode();
         DragAcceptFiles(hWnd, FALSE);
         ui.pTaskbar.Reset();
         DeleteObject(ui.hFontUI);
@@ -949,7 +945,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
 {
     g_hInst = hInst;
-
+    g_vm = std::make_shared<MainViewModel>(WAVE_SAMPLES);
     LANGID uiLang = GetUserDefaultUILanguage();
     if (PRIMARYLANGID(uiLang) != LANG_FRENCH) {
         SetThreadUILanguage(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
@@ -992,8 +988,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    if (g_encodeJob) g_encodeJob->RequestStop();
-    g_waveform->Join();
+    if (g_vm) g_vm->CancelEncode();
     MFShutdown();
     CoUninitialize();
     return (int)msg.wParam;
