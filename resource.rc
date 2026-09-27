@@ -3,8 +3,8 @@
 #include <windows.h>
 
 200 VERSIONINFO
-FILEVERSION     0,0,1,0
-PRODUCTVERSION  0,0,1,0
+FILEVERSION     0,0,2,0
+PRODUCTVERSION  0,0,2,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -12,11 +12,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "github.com/rmoalic"
       VALUE "FileDescription", "Replace a video sound with an mp3"
-      VALUE "FileVersion", "0.0.1"
+      VALUE "FileVersion", "0.0.2"
       VALUE "InternalName", "RemplaceurMusique"
       VALUE "OriginalFilename", "RemplaceurMusique.exe"
       VALUE "ProductName", "RemplaceurMusique"
-      VALUE "ProductVersion", "0.0.1"
+      VALUE "ProductVersion", "0.0.2"
     END
   END
   BLOCK "VarFileInfo"
